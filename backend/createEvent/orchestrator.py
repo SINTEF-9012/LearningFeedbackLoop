@@ -1,6 +1,11 @@
-import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+import asyncio
+import json
+import uvicorn
+import os 
+import numpy as np
+from pathlib import Path
 
 # replace with your real import
 from turnmill_process import TurnmillProcess  # assumes this exists on PYTHONPATH
@@ -36,7 +41,7 @@ async def publish_flag(flag):
     print("PUBLISH FLAG", flag)
 
 
-async def main(run_seconds: float = 60.0, run_fake: bool = False):
+async def main(run_fake: bool = False):
     q = asyncio.Queue(maxsize=100)
 
     # instantiate turnmill_process from a json file if present
@@ -62,7 +67,7 @@ async def main(run_seconds: float = 60.0, run_fake: bool = False):
     # optionally start the test device (keeps running until cancelled)
     fake_task = None
     if run_fake:
-        from .fake_device import fake_device  # relative import; file provided below
+        from test_device import fake_device  # relative import; file provided below
         fake_task = asyncio.create_task(fake_task := fake_device("http://127.0.0.1:8000/ingest", interval=0.1))
 
     try:
