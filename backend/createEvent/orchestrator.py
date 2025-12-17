@@ -6,10 +6,12 @@ import uvicorn
 import os 
 import numpy as np
 from pathlib import Path
+import time
+
+start_time = None
 
 # replace with your real import
 from turnmill_process import TurnmillProcess  # assumes this exists on PYTHONPATH
-
 
 app = FastAPI()
 
@@ -31,7 +33,20 @@ async def worker(queue, tm):
             # SEND EVENT TO ANALYSIS MODULE (turnmill_process)
             # e.g. result = await asyncio.to_thread(tm.process, event)
             # if result: await publish_flag(result)
-            print("PROCESS", event.get("source"), event.get("i"))
+            # elapsed time since server start (perf_counter is monotonic)
+            app_start = getattr(app.state, "start_time", None)
+            elapsed = None if app_start is None else time.perf_counter() - app_start
+            print("PROCESS", event.get("source"), event.get("i"), "elapsed=", elapsed)
+
+            # extract values (event['data'] may be awaitable depending on source)
+            values = event.get("data")
+            if asyncio.iscoroutine(values):
+                values = await values
+            for idx in range(len(values[0])):
+                timestamp = elapsed
+                datapoint = [values[ch][idx] for ch in range(tm.nChannels)]
+                tm.add_datapoint(timestamp, datapoint)
+
         finally:
             queue.task_done()
 
@@ -41,48 +56,68 @@ async def publish_flag(flag):
     print("PUBLISH FLAG", flag)
 
 
-async def main(run_fake: bool = False):
+async def main(source_file: str):
     q = asyncio.Queue(maxsize=100)
 
     # instantiate turnmill_process from a json file if present
-    init_path = Path("testdata") / "init.json"
-    if init_path.exists():
-        init = json.loads(init_path.read_text())
-        tm = TurnmillProcess(init)
-    else:
-        tm = TurnmillProcess({})
+    init_path = os.path.join(Path.cwd(), "testdata", source_file)
+    init = None
+    try:
+        with open(init_path, "r", encoding="utf-8") as fh:
+            init = json.load(fh)
+    except FileNotFoundError:
+        print(f"Initialization file not found: {init_path}")
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON from {init_path}: {e}")
+
+    # if init is None, TurnmillProcess should decide how to initialize from defaults
+    tm = TurnmillProcess(init, nChannels=3)
 
     # attach to app for access from endpoint
     app.state.queue = q
     app.state.tm = tm
+    # record server start time (monotonic)
+    app.state.start_time = time.perf_counter()
+    print("Server start_time set:", app.state.start_time)
 
     # start the FastAPI server in background
     config = uvicorn.Config(app, host="127.0.0.1", port=8000, loop="asyncio", lifespan="on")
     server = uvicorn.Server(config)
     server_task = asyncio.create_task(server.serve())
 
-    # start worker(s)
     workers = [asyncio.create_task(worker(q, tm)) for _ in range(2)]
 
-    # optionally start the test device (keeps running until cancelled)
-    fake_task = None
-    if run_fake:
-        from test_device import fake_device  # relative import; file provided below
-        fake_task = asyncio.create_task(fake_task := fake_device("http://127.0.0.1:8000/ingest", interval=0.1))
-
     try:
-        await asyncio.sleep(run_seconds)
+        # sleep forever (any of these works)
+        await asyncio.Future()          # never completes
+        # or: while True: await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        # gets triggered if outer code cancels main()
+        pass
     finally:
-        if fake_task:
-            fake_task.cancel()
+        # graceful shutdown
         for w in workers:
             w.cancel()
+        # ask uvicorn to exit
         server.should_exit = True
-        await asyncio.sleep(0.1)
-
+        # optional: finish in-flight queue items before exiting
+        # await q.join()
+        await asyncio.gather(*workers, return_exceptions=True)
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main(run_seconds=60.0, run_fake=False))
+        testdata_root = Path.cwd() / "testdata"
+        if not testdata_root.exists():
+            print(f"testdata directory not found: {testdata_root}")
+            raise SystemExit(1)
+
+        while True:
+            source = input("Enter Source File (e.g. Diameter16Z4endmill/0.json): ").strip()
+            candidate = testdata_root / source
+            if candidate.exists():
+                break
+            print(f"File not found: {candidate}. Try again.")
+
+        asyncio.run(main(source))
     except KeyboardInterrupt:
         print("shutdown")
