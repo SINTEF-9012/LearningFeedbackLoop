@@ -60,7 +60,7 @@ def main():
                 # Optional: backoff / retry; for now just break
                 break
 
-            i += len(chunk)
+            i += len(chunk[0])
             if i < total:
                 time.sleep(interval)  # wait until next interval
     except KeyboardInterrupt:
