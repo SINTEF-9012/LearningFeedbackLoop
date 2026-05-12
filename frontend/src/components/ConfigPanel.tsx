@@ -26,6 +26,9 @@ export default function ConfigPanel({ config, onChange }: Props) {
     setTimeout(() => setMsg(""), 3000);
   };
 
+  const tOut = Math.floor(config.cnn_window / 2 ** config.conv_channels.length);
+  const perStepDim = 2 * config.pair_embed_dim; // n_channels=2 (X,Y)
+
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-bold">Pipeline Configuration</h2>
@@ -39,11 +42,19 @@ export default function ConfigPanel({ config, onChange }: Props) {
               onChange={(e) => update("data_dir", e.target.value)}
             />
           </Field>
+          <Field label="Sample rate (Hz)">
+            <input
+              type="number"
+              className={inputClass}
+              value={config.sample_rate}
+              onChange={(e) => update("sample_rate", +e.target.value)}
+            />
+          </Field>
         </Card>
 
-        <Card title="FFT Parameters">
+        <Card title="Peak extraction (FFT)">
           <div className="space-y-2">
-            <Field label="FFT Window Size (samples)">
+            <Field label="FFT window (samples)">
               <input
                 type="number"
                 className={inputClass}
@@ -51,7 +62,7 @@ export default function ConfigPanel({ config, onChange }: Props) {
                 onChange={(e) => update("fft_window", +e.target.value)}
               />
             </Field>
-            <Field label="FFT Step / Stride (samples)">
+            <Field label="FFT stride (samples)">
               <input
                 type="number"
                 className={inputClass}
@@ -59,27 +70,38 @@ export default function ConfigPanel({ config, onChange }: Props) {
                 onChange={(e) => update("fft_step", +e.target.value)}
               />
             </Field>
-            <Field label="Harmonic Multipliers (comma-separated)">
+            <Field label="Peaks per channel (K)">
+              <input
+                type="number"
+                className={inputClass}
+                value={config.k_peaks}
+                onChange={(e) => update("k_peaks", +e.target.value)}
+              />
+            </Field>
+            <Field label="Max frequency (× spindle, blank = no cap)">
               <input
                 className={inputClass}
-                value={config.harm_mults.join(", ")}
-                onChange={(e) =>
-                  update(
-                    "harm_mults",
-                    e.target.value
-                      .split(",")
-                      .map((s) => parseInt(s.trim()))
-                      .filter((n) => !isNaN(n))
-                  )
-                }
+                value={config.f_max_rel ?? ""}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  update("f_max_rel", v === "" ? null : +v);
+                }}
               />
             </Field>
           </div>
         </Card>
 
-        <Card title="CNN Architecture">
+        <Card title="Model architecture">
           <div className="space-y-2">
-            <Field label="CNN Window Size (time steps)">
+            <Field label="Pair encoder embedding dim (D)">
+              <input
+                type="number"
+                className={inputClass}
+                value={config.pair_embed_dim}
+                onChange={(e) => update("pair_embed_dim", +e.target.value)}
+              />
+            </Field>
+            <Field label="CNN window (time steps)">
               <input
                 type="number"
                 className={inputClass}
@@ -87,22 +109,19 @@ export default function ConfigPanel({ config, onChange }: Props) {
                 onChange={(e) => update("cnn_window", +e.target.value)}
               />
             </Field>
-            <Field label="Conv Channels (comma-separated)">
+            <Field label="Conv channels (comma-separated)">
               <input
                 className={inputClass}
                 value={config.conv_channels.join(", ")}
                 onChange={(e) =>
                   update(
                     "conv_channels",
-                    e.target.value
-                      .split(",")
-                      .map((s) => parseInt(s.trim()))
-                      .filter((n) => !isNaN(n))
+                    e.target.value.split(",").map((s) => parseInt(s.trim())).filter((n) => !isNaN(n))
                   )
                 }
               />
             </Field>
-            <Field label="FC Hidden Size">
+            <Field label="FC hidden size">
               <input
                 type="number"
                 className={inputClass}
@@ -110,7 +129,7 @@ export default function ConfigPanel({ config, onChange }: Props) {
                 onChange={(e) => update("fc_hidden", +e.target.value)}
               />
             </Field>
-            <Field label="Kernel Size">
+            <Field label="Kernel size">
               <input
                 type="number"
                 className={inputClass}
@@ -121,11 +140,18 @@ export default function ConfigPanel({ config, onChange }: Props) {
           </div>
         </Card>
 
-        <Card title="Computed Info">
+        <Card title="Computed">
           <div className="space-y-1 text-sm text-gray-600">
-            <p>Harmonic features per step: <strong>{config.harm_mults.length * 3}</strong> ({config.harm_mults.length} harmonics × 3 channels)</p>
+            <p>Pairs per timestep: <strong>{2 * config.k_peaks}</strong> (2 channels × {config.k_peaks})</p>
+            <p>Per-step embedding (after sum over K): <strong>{perStepDim}</strong></p>
             <p>Pooling layers: <strong>{config.conv_channels.length}</strong></p>
-            <p>Temporal dim after pooling: <strong>{Math.floor(config.cnn_window / (2 ** config.conv_channels.length))}</strong></p>
+            <p>Temporal dim after pooling: <strong>{tOut}</strong></p>
+            <p className="text-xs text-gray-400 pt-2">
+              Each FFT window yields the top-{config.k_peaks} spectral peaks per channel as
+              (f<sub>rel</sub> = f<sub>Hz</sub> / f<sub>g</sub>, amplitude) pairs. The model
+              encodes each pair through a shared MLP and sums them per channel before the
+              temporal CNN.
+            </p>
           </div>
         </Card>
       </div>

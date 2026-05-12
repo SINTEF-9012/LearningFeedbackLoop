@@ -2,8 +2,11 @@ export interface PipelineConfig {
   data_dir: string;
   fft_window: number;
   fft_step: number;
-  harm_mults: number[];
+  sample_rate: number;
+  k_peaks: number;
+  f_max_rel: number | null;
   cnn_window: number;
+  pair_embed_dim: number;
   conv_channels: number[];
   fc_hidden: number;
   kernel_size: number;
@@ -13,8 +16,11 @@ export const defaultConfig: PipelineConfig = {
   data_dir: "../lfl/testdata",
   fft_window: 4096,
   fft_step: 4096,
-  harm_mults: [1, 2, 3, 4, 6, 8, 10],
+  sample_rate: 4096,
+  k_peaks: 5,
+  f_max_rel: 12,
   cnn_window: 16,
+  pair_embed_dim: 16,
   conv_channels: [16, 16],
   fc_hidden: 32,
   kernel_size: 5,
@@ -68,28 +74,27 @@ export interface EvalResponse {
   error?: string;
 }
 
+// --- Streaming simulation (pair-input model) ---
+
 export interface SimInit {
   type: "init";
   total_steps: number;
-  n_features: number;
-  harm_labels: string[];
-  mag_harm_labels: string[];
-  harm_mults: number[];
-  spindle_freq: number;
-  z: number;
+  n_channels: number;
+  k_peaks: number;
+  channel_names: string[];     // e.g. ["X", "Y"]
+  spindle_freq: number;        // fg in Hz
   cnn_window: number;
   broke: boolean;
   params: Record<string, number>;
   file: string;
-  w_vec: number[];
+  f_max_rel: number | null;
 }
 
+// pairs[c][k] = [f_rel, amp] for channel c, peak slot k
 export interface SimStep {
   type: "step";
   t: number;
-  harmonics: number[];
-  mag_harmonics: number[];
-  combined: number;
+  pairs: number[][][];
   prob: number | null;
   inference_ms: number | null;
 }

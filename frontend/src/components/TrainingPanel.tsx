@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import type Plotly from "plotly.js";
 import type { PipelineConfig, FolderInfo, LRStage, TrainStatus } from "../types";
-import { getFolders, startTraining, getTrainStatus, stopTraining, resetModel, setConfig } from "../api";
+import { getFolders, startTraining, getTrainStatus, stopTraining, resetModel, setConfig, getModelWeights, type ModelWeights } from "../api";
 import { Card, Field, inputClass, btnPrimary, btnDanger, btnSecondary, Badge, usePlotly } from "../ui";
 
 interface Props {
@@ -145,6 +145,88 @@ export default function TrainingPanel({ config, onModelTrained, onModelReset }: 
     legend: { orientation: "h", y: -0.2 },
   };
   const lossRef = usePlotly(lossData, lossLayout);
+
+  // -- Pair-encoder weights visualization -----------------------------------
+  const [weights, setWeights] = useState<ModelWeights | null>(null);
+  const refreshWeights = useCallback(async () => {
+    const w = await getModelWeights();
+    if (!w.error) setWeights(w);
+  }, []);
+  // Auto-refresh weights when training transitions from running -> stopped.
+  const wasRunningRef = useRef(false);
+  useEffect(() => {
+    const running = status?.running ?? false;
+    if (wasRunningRef.current && !running) {
+      refreshWeights();
+    }
+    wasRunningRef.current = running;
+  }, [status?.running, refreshWeights]);
+
+  // Per-pair encoder first-layer weights: shape (D, 2). Each row is one
+  // hidden neuron's reading of (f_rel, amp). Together they form the basis
+  // the model uses to encode a single (frequency, amplitude) peak.
+  const wHeatmapData: Plotly.Data[] = useMemo(() => {
+    if (!weights) return [];
+    const absMax = weights.pair_encoder_W1.reduce(
+      (m, row) => Math.max(m, ...row.map((v) => Math.abs(v))), 0
+    ) || 1;
+    return [{
+      z: weights.pair_encoder_W1,
+      x: weights.pair_input_labels,
+      y: weights.pair_encoder_W1.map((_, i) => `n${i}`),
+      type: "heatmap" as const,
+      colorscale: "RdBu",
+      reversescale: true,
+      zmin: -absMax,
+      zmax: absMax,
+      colorbar: { title: { text: "W" } },
+      hovertemplate: "neuron %{y} \u2190 %{x}<br>W = %{z:.4f}<extra></extra>",
+    }];
+  }, [weights]);
+
+  const wHeatmapLayout: Partial<Plotly.Layout> = useMemo(() => ({
+    title: { text: "Pair encoder W\u2081 \u2014 hidden neurons \u2190 (f_rel, amp)", font: { size: 13 } },
+    xaxis: { title: { text: "Pair input" }, side: "top" },
+    yaxis: { title: { text: "Hidden neuron" }, autorange: "reversed" },
+    margin: { t: 60, r: 20, b: 40, l: 80 },
+    height: weights ? Math.max(280, 14 * weights.pair_encoder_W1.length + 80) : 280,
+  }), [weights]);
+  const wHeatmapRef = usePlotly(wHeatmapData, wHeatmapLayout);
+
+  // Sample the encoder over a small (f_rel, amp) grid to show what feature
+  // each neuron responds to. We use only the first linear layer + ReLU as
+  // a quick sketch of selectivity; later layers compose these.
+  const encoderResponseData: Plotly.Data[] = useMemo(() => {
+    if (!weights) return [];
+    const W1 = weights.pair_encoder_W1;
+    const b1 = weights.pair_encoder_b1;
+    const D = W1.length;
+    // Pick a few representative neurons (first 6 by output norm of W1 row)
+    const norms = W1.map((row, i) => ({ i, n: Math.hypot(row[0], row[1]) }));
+    norms.sort((a, b) => b.n - a.n);
+    const picks = norms.slice(0, Math.min(6, D)).map((p) => p.i);
+    // For each picked neuron, sample over f_rel ∈ [0.5, 12], amp normalized 1.
+    const fGrid = Array.from({ length: 60 }, (_, i) => 0.5 + i * (12 - 0.5) / 59);
+    const palette = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ef4444", "#06b6d4"];
+    return picks.map((idx, k) => ({
+      x: fGrid,
+      y: fGrid.map((f) => Math.max(0, W1[idx][0] * f + W1[idx][1] * 1.0 + b1[idx])),
+      type: "scatter" as const,
+      mode: "lines" as const,
+      name: `n${idx}`,
+      line: { color: palette[k % palette.length], width: 1.5 },
+    }));
+  }, [weights]);
+
+  const encoderResponseLayout: Partial<Plotly.Layout> = {
+    title: { text: "Encoder neuron response (amp = 1, varying f_rel) \u2014 ReLU(W\u2081·[f_rel, 1] + b\u2081)", font: { size: 13 } },
+    xaxis: { title: { text: "f_rel = f / fg" } },
+    yaxis: { title: { text: "Activation" }, zeroline: true, zerolinecolor: "#9ca3af" },
+    margin: { t: 40, r: 20, b: 50, l: 60 },
+    height: 320,
+    legend: { orientation: "h", y: -0.25 },
+  };
+  const wColumnsRef = usePlotly(encoderResponseData, encoderResponseLayout);
 
   const isTraining = status?.running ?? false;
   const progress = status ? Math.round((status.current_epoch / Math.max(status.total_epochs, 1)) * 100) : 0;
@@ -332,6 +414,69 @@ export default function TrainingPanel({ config, onModelTrained, onModelReset }: 
       {/* Loss curve */}
       <Card title="Loss Curve">
         <div ref={lossRef} className="plotly-chart" />
+      </Card>
+
+      {/* Pair-encoder weights visualization */}
+      <Card title="Pair encoder (per-peak shared MLP)">
+        {!weights ? (
+          <div className="space-y-3">
+            <p className="text-sm text-gray-400 py-2 text-center">
+              Train a model to inspect the per-pair encoder weights.
+            </p>
+            <div className="flex justify-center">
+              <button
+                onClick={refreshWeights}
+                className="text-xs text-indigo-600 hover:text-indigo-800"
+                disabled={isTraining}
+              >
+                Try fetch
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-start justify-between gap-4">
+              <p className="text-xs text-gray-500 flex-1">
+                Each (frequency, amplitude) peak is fed through a shared MLP. The first
+                layer has weights of shape ({weights.pair_encoder_W1.length} hidden ×{" "}
+                {weights.pair_input_labels.length} inputs). The heatmap shows raw
+                weights; the lower chart sweeps each strong neuron over a range of
+                f<sub>rel</sub> with amplitude fixed at 1, so you can see which
+                neurons are tuned to which spectral region.
+              </p>
+              <button
+                onClick={refreshWeights}
+                className="text-xs text-indigo-600 hover:text-indigo-800 flex-shrink-0"
+                disabled={isTraining}
+              >
+                Refresh
+              </button>
+            </div>
+            <div ref={wHeatmapRef} className="plotly-chart" />
+            <div ref={wColumnsRef} className="plotly-chart" />
+            <div className="text-xs text-gray-500 pt-2 border-t border-gray-100">
+              <p className="font-medium mb-1">Cutting-parameter standardization</p>
+              <table className="text-xs w-full">
+                <thead>
+                  <tr className="text-gray-400">
+                    <th className="text-left">param</th>
+                    <th className="text-right">mean</th>
+                    <th className="text-right">std</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {weights.param_keys.map((k, i) => (
+                    <tr key={k}>
+                      <td>{k}</td>
+                      <td className="text-right tabular-nums">{weights.param_mean[i].toFixed(4)}</td>
+                      <td className="text-right tabular-nums">{weights.param_std[i].toFixed(4)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </Card>
     </div>
   );

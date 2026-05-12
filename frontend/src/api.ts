@@ -11,7 +11,9 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export async function getConfig() {
-  return fetchJSON<PipelineConfig & { device: string; model_loaded: boolean }>("/api/config");
+  return fetchJSON<PipelineConfig & { device: string; model_loaded: boolean; channel_names: string[] }>(
+    "/api/config"
+  );
 }
 
 export async function setConfig(config: PipelineConfig) {
@@ -67,6 +69,24 @@ export async function stopTraining() {
 
 export async function resetModel() {
   return fetchJSON<any>("/api/train/reset", { method: "POST" });
+}
+
+export interface ModelWeights {
+  pair_encoder_W1: number[][];   // (D, 2)
+  pair_encoder_b1: number[];     // (D,)
+  pair_input_labels: string[];   // ["f_rel", "amp"]
+  pair_embed_dim: number;
+  param_mean: number[];
+  param_std: number[];
+  param_keys: string[];
+  channel_names: string[];
+  k_peaks: number;
+  n_channels: number;
+  error?: string;
+}
+
+export async function getModelWeights() {
+  return fetchJSON<ModelWeights>("/api/model/weights");
 }
 
 export async function evaluate(body: {

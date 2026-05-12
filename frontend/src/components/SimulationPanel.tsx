@@ -5,12 +5,13 @@ import { getFolders, getFiles, getTestFiles } from "../api";
 import type { TestFileInfo } from "../api";
 import { Card, Field, inputClass, btnPrimary, btnDanger, btnSecondary, Badge, usePlotly } from "../ui";
 
-type AxisChoice = "X" | "Y" | "Z" | "Mag";
 type FileSource = "folders" | "test_set";
 
 interface Props {
   config: PipelineConfig;
 }
+
+const CHANNEL_COLORS = ["#3b82f6", "#10b981", "#f59e0b"];
 
 export default function SimulationPanel({ config }: Props) {
   const [fileSource, setFileSource] = useState<FileSource>("folders");
@@ -25,21 +26,14 @@ export default function SimulationPanel({ config }: Props) {
   const [paused, setPaused] = useState(false);
   const [initData, setInitData] = useState<SimInit | null>(null);
 
-  // Accumulated data
   const [timeSteps, setTimeSteps] = useState<number[]>([]);
-  const [combinedVals, setCombinedVals] = useState<number[]>([]);
   const [probVals, setProbVals] = useState<(number | null)[]>([]);
-  const [harmData, setHarmData] = useState<number[][]>([]);
-  const [magHarmData, setMagHarmData] = useState<number[][]>([]);
   const [inferenceTimes, setInferenceTimes] = useState<number[]>([]);
-
-  // Harmonic display controls
-  const [selectedAxis, setSelectedAxis] = useState<AxisChoice>("X");
-  const [visibleHarmonics, setVisibleHarmonics] = useState<Set<number>>(new Set());
+  // pairsHistory[t] = SimStep["pairs"]  shape (C, K, 2)
+  const [pairsHistory, setPairsHistory] = useState<number[][][][]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Load folders and test files
   useEffect(() => {
     getFolders().then((d) => setFolders(d.folders || [])).catch(() => {});
     getTestFiles().then((d) => {
@@ -48,7 +42,6 @@ export default function SimulationPanel({ config }: Props) {
     }).catch(() => {});
   }, []);
 
-  // Load files when folder changes
   useEffect(() => {
     if (!selFolder) return;
     getFiles(selFolder).then((d) => {
@@ -57,24 +50,14 @@ export default function SimulationPanel({ config }: Props) {
     });
   }, [selFolder]);
 
-  // Set initial folder
   useEffect(() => {
     if (folders.length && !selFolder) setSelFolder(folders[0].name);
   }, [folders, selFolder]);
 
-  // Initialize visible harmonics when initData arrives
-  useEffect(() => {
-    if (initData) {
-      setVisibleHarmonics(new Set(initData.harm_mults.map((_: number, i: number) => i)));
-    }
-  }, [initData]);
-
   const reset = useCallback(() => {
     setTimeSteps([]);
-    setCombinedVals([]);
     setProbVals([]);
-    setHarmData([]);
-    setMagHarmData([]);
+    setPairsHistory([]);
     setInferenceTimes([]);
     setInitData(null);
     setRunning(false);
@@ -90,13 +73,7 @@ export default function SimulationPanel({ config }: Props) {
     const filePath = fileSource === "test_set" ? selTestFile : `${selFolder}/${selFile}`;
 
     ws.onopen = () => {
-      ws.send(
-        JSON.stringify({
-          action: "start",
-          file_path: filePath,
-          speed,
-        })
-      );
+      ws.send(JSON.stringify({ action: "start", file_path: filePath, speed }));
       setRunning(true);
     };
 
@@ -107,10 +84,8 @@ export default function SimulationPanel({ config }: Props) {
       } else if (msg.type === "step") {
         const step = msg as SimStep;
         setTimeSteps((p) => [...p, step.t]);
-        setCombinedVals((p) => [...p, step.combined]);
         setProbVals((p) => [...p, step.prob]);
-        setHarmData((p) => [...p, step.harmonics]);
-        setMagHarmData((p) => [...p, step.mag_harmonics]);
+        setPairsHistory((p) => [...p, step.pairs]);
         if (step.inference_ms !== null) {
           setInferenceTimes((p) => [...p, step.inference_ms!]);
         }
@@ -133,77 +108,33 @@ export default function SimulationPanel({ config }: Props) {
     wsRef.current?.send(JSON.stringify({ action: "pause" }));
     setPaused(true);
   };
-
   const handleResume = () => {
     wsRef.current?.send(JSON.stringify({ action: "resume" }));
     setPaused(false);
   };
-
   const handleStop = () => {
     wsRef.current?.send(JSON.stringify({ action: "stop" }));
     wsRef.current?.close();
     setRunning(false);
     setPaused(false);
   };
-
   const handleSpeedChange = (newSpeed: number) => {
     setSpeed(newSpeed);
-    if (running) {
-      wsRef.current?.send(JSON.stringify({ action: "set_speed", speed: newSpeed }));
-    }
+    if (running) wsRef.current?.send(JSON.stringify({ action: "set_speed", speed: newSpeed }));
   };
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      wsRef.current?.close();
-    };
-  }, []);
+  useEffect(() => () => wsRef.current?.close(), []);
 
-  const toggleHarmonic = (idx: number) => {
-    setVisibleHarmonics((prev) => {
-      const next = new Set(prev);
-      if (next.has(idx)) next.delete(idx);
-      else next.add(idx);
-      return next;
-    });
-  };
-
-  const selectAllHarmonics = () => {
-    if (initData) setVisibleHarmonics(new Set(initData.harm_mults.map((_: number, i: number) => i)));
-    else setVisibleHarmonics(new Set(config.harm_mults.map((_: number, i: number) => i)));
-  };
-
-  const selectNoneHarmonics = () => setVisibleHarmonics(new Set());
-
-  // -- Derived data --
   const validProbs = probVals.filter((p): p is number => p !== null);
   const validProbSteps = timeSteps.filter((_, i) => probVals[i] !== null);
-
   const latestProb = validProbs.length > 0 ? validProbs[validProbs.length - 1] : null;
   const progress = initData ? Math.round((timeSteps.length / initData.total_steps) * 100) : 0;
   const avgInferenceMs = inferenceTimes.length > 0
     ? inferenceTimes.reduce((a, b) => a + b, 0) / inferenceTimes.length
     : null;
 
-  const nHarm = initData?.harm_mults.length ?? config.harm_mults.length;
-  const axisOffset = selectedAxis === "X" ? 0 : selectedAxis === "Y" ? 1 : selectedAxis === "Z" ? 2 : -1;
-
-  const spindleHarmIdx = initData ? initData.harm_mults.indexOf(1) : -1;
-  const toothPassMult = initData ? initData.z : 0;
-  const toothPassHarmIdx = initData ? initData.harm_mults.indexOf(toothPassMult) : -1;
-
-  // Combined + P(broke) chart
-  const mainData: Plotly.Data[] = [
-    {
-      x: timeSteps,
-      y: combinedVals,
-      type: "scatter",
-      mode: "lines",
-      name: "w · harmonics",
-      line: { color: "#3b82f6", width: 1.2 },
-      yaxis: "y",
-    },
+  // -- Probability chart --
+  const probData: Plotly.Data[] = [
     {
       x: validProbSteps,
       y: validProbs,
@@ -211,7 +142,6 @@ export default function SimulationPanel({ config }: Props) {
       mode: "lines",
       name: "P(broke)",
       line: { color: "#111827", width: 2 },
-      yaxis: "y2",
     },
     {
       x: initData ? [0, initData.total_steps] : [],
@@ -220,112 +150,137 @@ export default function SimulationPanel({ config }: Props) {
       mode: "lines",
       name: "threshold",
       line: { color: "#9ca3af", width: 1, dash: "dash" },
-      yaxis: "y2",
       showlegend: false,
     },
   ];
-
-  const mainLayout: Partial<Plotly.Layout> = {
-    title: { text: "Combined Signal & Break Probability", font: { size: 13 } },
+  const probLayout: Partial<Plotly.Layout> = {
+    title: { text: "Break probability over time", font: { size: 13 } },
     xaxis: { title: { text: "Time step" }, range: initData ? [0, initData.total_steps] : undefined },
-    yaxis: { title: { text: "w · harmonics" }, side: "left" },
-    yaxis2: {
-      title: { text: "P(broke)" },
-      side: "right",
-      overlaying: "y",
-      range: [-0.05, 1.05],
-    },
-    legend: { orientation: "h", y: -0.2 },
-    margin: { t: 40, r: 60, b: 60, l: 60 },
-    height: 350,
+    yaxis: { title: { text: "P(broke)" }, range: [-0.05, 1.05] },
+    margin: { t: 40, r: 20, b: 50, l: 60 },
+    height: 260,
   };
-  const mainRef = usePlotly(mainData, mainLayout);
+  const probRef = usePlotly(probData, probLayout);
 
-  // Build harmonic traces based on selected axis and checked harmonics
-  const harmTraces: Plotly.Data[] = useMemo(() => {
-    if (!initData || harmData.length === 0) return [];
-    const mults = initData.harm_mults;
+  // -- Peak-pair scatter per channel: x=t, y=f_Hz, marker size=amp --
+  // We build this once per pairsHistory change. Keep the markers reasonable
+  // by scaling amplitudes globally per channel (largest amp -> ~20px).
+  const peakScatterData: Plotly.Data[] = useMemo(() => {
+    if (!initData || pairsHistory.length === 0) return [];
+    const fg = initData.spindle_freq;
+    const C = initData.n_channels;
     const traces: Plotly.Data[] = [];
-    const visibleIdxs = Array.from(visibleHarmonics).sort((a, b) => a - b);
-
-    for (const hi of visibleIdxs) {
-      if (hi >= mults.length) continue;
-      const mult = mults[hi];
-      const isSpindle = hi === spindleHarmIdx;
-      const isToothPass = hi === toothPassHarmIdx;
-      const isBold = isSpindle || isToothPass;
-
-      let label: string;
-      let yValues: number[];
-
-      if (selectedAxis === "Mag") {
-        label = `Mag·${mult}×fg`;
-        yValues = magHarmData.map((h) => h[hi] ?? 0);
-      } else {
-        const chIdx = axisOffset;
-        const colIdx = chIdx * nHarm + hi;
-        label = `${selectedAxis}·${mult}×fg`;
-        yValues = harmData.map((h) => h[colIdx] ?? 0);
+    // First pass: per-channel max amplitude for marker scaling.
+    const maxAmps = Array(C).fill(1e-9);
+    for (const tStep of pairsHistory) {
+      for (let c = 0; c < C; c++) {
+        for (const pk of tStep[c]) {
+          if (pk[1] > maxAmps[c]) maxAmps[c] = pk[1];
+        }
       }
-
-      if (isSpindle) label += " (spindle)";
-      if (isToothPass) label += " (tooth-pass)";
-
+    }
+    for (let c = 0; c < C; c++) {
+      const xs: number[] = [];
+      const ys: number[] = [];
+      const sizes: number[] = [];
+      const customs: number[] = [];
+      for (let t = 0; t < pairsHistory.length; t++) {
+        const tStep = pairsHistory[t];
+        const tNum = timeSteps[t] ?? t;
+        for (const pk of tStep[c]) {
+          const fRel = pk[0];
+          const amp = pk[1];
+          if (amp <= 0) continue; // padding slots
+          xs.push(tNum);
+          ys.push(fRel * fg);
+          sizes.push(4 + 18 * (amp / maxAmps[c]));
+          customs.push(amp);
+        }
+      }
       traces.push({
-        x: timeSteps,
-        y: yValues,
-        type: "scatter" as const,
-        mode: "lines" as const,
-        name: label,
-        line: { width: isBold ? 2.5 : 1 },
+        x: xs,
+        y: ys,
+        type: "scatter",
+        mode: "markers",
+        name: initData.channel_names[c] ?? `ch${c}`,
+        marker: {
+          color: CHANNEL_COLORS[c % CHANNEL_COLORS.length],
+          size: sizes,
+          opacity: 0.55,
+          line: { width: 0 },
+        },
+        customdata: customs,
+        hovertemplate:
+          "t=%{x}<br>f=%{y:.1f} Hz<br>amp=%{customdata:.2f}<extra>%{fullData.name}</extra>",
       });
     }
     return traces;
-  }, [initData, harmData, magHarmData, timeSteps, selectedAxis, visibleHarmonics, nHarm, axisOffset, spindleHarmIdx, toothPassHarmIdx]);
+  }, [initData, pairsHistory, timeSteps]);
 
-  const harmLayout: Partial<Plotly.Layout> = {
-    title: { text: `Harmonic Magnitudes — ${selectedAxis === "Mag" ? "||accel||" : `Accel ${selectedAxis}`}`, font: { size: 13 } },
+  const peakLayout: Partial<Plotly.Layout> = {
+    title: { text: "Peak-pair stream — frequency vs time, marker size ∝ amplitude", font: { size: 13 } },
     xaxis: { title: { text: "Time step" }, range: initData ? [0, initData.total_steps] : undefined },
-    yaxis: { title: { text: "|FFT|" } },
-    legend: { orientation: "h", y: -0.25, font: { size: 9 } },
-    margin: { t: 40, r: 20, b: 70, l: 60 },
-    height: 350,
+    yaxis: {
+      title: { text: "Frequency (Hz)" },
+      range: initData
+        ? [0, (initData.f_max_rel ?? 12) * initData.spindle_freq]
+        : undefined,
+    },
+    legend: { orientation: "h", y: -0.2 },
+    margin: { t: 40, r: 20, b: 60, l: 60 },
+    height: 360,
   };
-  const harmRef = usePlotly(harmTraces, harmLayout);
+  const peakRef = usePlotly(peakScatterData, peakLayout);
 
-  // W-vector bar charts (one per channel: X, Y, Z, Mag)
-  const wBarAxes = ["X", "Y", "Z", "Mag"] as const;
-  const axisColors = { X: "#3b82f6", Y: "#10b981", Z: "#f59e0b", Mag: "#8b5cf6" };
+  // -- Latest spectrum snapshot: stem plot of current K peaks per channel --
+  const latestPairs = pairsHistory[pairsHistory.length - 1];
+  const snapshotData: Plotly.Data[] = useMemo(() => {
+    if (!initData || !latestPairs) return [];
+    const fg = initData.spindle_freq;
+    const traces: Plotly.Data[] = [];
+    for (let c = 0; c < initData.n_channels; c++) {
+      // Build vertical stems: for each peak emit (x, 0)->(x, amp) using None separators.
+      const xs: (number | null)[] = [];
+      const ys: (number | null)[] = [];
+      for (const pk of latestPairs[c]) {
+        if (pk[1] <= 0) continue;
+        const fHz = pk[0] * fg;
+        xs.push(fHz, fHz, null);
+        ys.push(0, pk[1], null);
+      }
+      traces.push({
+        x: xs,
+        y: ys,
+        type: "scatter",
+        mode: "lines+markers",
+        name: initData.channel_names[c] ?? `ch${c}`,
+        line: { color: CHANNEL_COLORS[c % CHANNEL_COLORS.length], width: 2 },
+        marker: { size: 6, color: CHANNEL_COLORS[c % CHANNEL_COLORS.length] },
+        connectgaps: false,
+      });
+    }
+    return traces;
+  }, [initData, latestPairs]);
 
-  const wBarData: Plotly.Data[][] = useMemo(() => {
-    if (!initData?.w_vec) return [[], [], [], []];
-    const nH = initData.harm_mults.length;
-    const labels = initData.harm_mults.map((m) => `${m}×fg`);
-    return wBarAxes.map((_, ai) => {
-      const vals = initData.w_vec.slice(ai * nH, (ai + 1) * nH);
-      return [{
-        x: labels,
-        y: vals,
-        type: "bar" as const,
-        marker: { color: vals.map((v) => v >= 0 ? axisColors[wBarAxes[ai]] : "#ef4444") },
-      }];
-    });
-  }, [initData]);
-
-  const wBarLayouts: Partial<Plotly.Layout>[] = wBarAxes.map((ax) => ({
-    title: { text: `w vector — ${ax === "Mag" ? "||accel||" : `Accel ${ax}`}`, font: { size: 13 } },
-    xaxis: { title: { text: "Harmonic" } },
-    yaxis: { title: { text: "Weight" } },
-    margin: { t: 40, r: 20, b: 50, l: 60 },
-    height: 220,
-    showlegend: false,
-  }));
-
-  const wBarRef0 = usePlotly(wBarData[0], wBarLayouts[0]);
-  const wBarRef1 = usePlotly(wBarData[1], wBarLayouts[1]);
-  const wBarRef2 = usePlotly(wBarData[2], wBarLayouts[2]);
-  const wBarRef3 = usePlotly(wBarData[3], wBarLayouts[3]);
-  const wBarRefs = [wBarRef0, wBarRef1, wBarRef2, wBarRef3];
+  const snapshotLayout: Partial<Plotly.Layout> = {
+    title: {
+      text: latestPairs
+        ? `Current spectrum (t=${timeSteps[timeSteps.length - 1]}) — top-${initData?.k_peaks ?? 0} peaks per channel`
+        : "Current spectrum",
+      font: { size: 13 },
+    },
+    xaxis: {
+      title: { text: "Frequency (Hz)" },
+      range: initData
+        ? [0, (initData.f_max_rel ?? 12) * initData.spindle_freq]
+        : undefined,
+    },
+    yaxis: { title: { text: "Amplitude" } },
+    legend: { orientation: "h", y: -0.25 },
+    margin: { t: 40, r: 20, b: 60, l: 60 },
+    height: 280,
+  };
+  const snapshotRef = usePlotly(snapshotData, snapshotLayout);
 
   const selFileInfo = fileSource === "folders"
     ? files.find((f) => f.name === selFile)
@@ -335,7 +290,6 @@ export default function SimulationPanel({ config }: Props) {
     <div className="space-y-4">
       <h2 className="text-xl font-bold">Simulation</h2>
 
-      {/* Controls */}
       <Card>
         <div className="flex flex-wrap items-end gap-4">
           <Field label="Source">
@@ -412,7 +366,6 @@ export default function SimulationPanel({ config }: Props) {
           </div>
         </div>
 
-        {/* Info bar */}
         <div className="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-gray-100 text-sm">
           {selFileInfo && (
             <>
@@ -424,9 +377,10 @@ export default function SimulationPanel({ config }: Props) {
           )}
           {initData && (
             <>
-              <span className="text-gray-500">{initData.total_steps} harmonic steps</span>
+              <span className="text-gray-500">{initData.total_steps} steps</span>
               <span className="text-gray-500">fg={initData.spindle_freq.toFixed(1)} Hz</span>
-              <span className="text-gray-500">z={initData.z}</span>
+              <span className="text-gray-500">K={initData.k_peaks} peaks/ch</span>
+              <span className="text-gray-500">channels: {initData.channel_names.join(", ")}</span>
             </>
           )}
           {latestProb !== null && (
@@ -442,7 +396,6 @@ export default function SimulationPanel({ config }: Props) {
           )}
         </div>
 
-        {/* Progress bar */}
         {initData && (
           <div className="w-full bg-gray-200 rounded-full h-1.5 mt-2">
             <div
@@ -453,93 +406,17 @@ export default function SimulationPanel({ config }: Props) {
         )}
       </Card>
 
-      {/* Main chart */}
       <Card>
-        <div ref={mainRef} className="plotly-chart" />
+        <div ref={probRef} className="plotly-chart" />
       </Card>
 
-      {/* W-vector bar charts — always mount divs so refs stay attached */}
-      <Card title="Learned Harmonic Weights (w = params × Wᵀ)">
-        {!initData?.w_vec && (
-          <p className="text-sm text-gray-400 py-4 text-center">
-            Start a simulation to see the learned harmonic weights.
-          </p>
-        )}
-        <div className={initData?.w_vec ? "space-y-2" : "hidden"}>
-          {wBarAxes.map((ax, i) => (
-            <div key={ax} ref={wBarRefs[i]} className="plotly-chart" />
-          ))}
-        </div>
+      <Card>
+        <div ref={peakRef} className="plotly-chart" />
       </Card>
 
-      {/* Harmonics chart + control panel */}
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
-        {/* Harmonic selection panel */}
-        <Card title="Harmonic Channels" className="lg:col-span-1">
-          <div className="space-y-3">
-            <Field label="Axis">
-              <select
-                className={inputClass}
-                value={selectedAxis}
-                onChange={(e) => setSelectedAxis(e.target.value as AxisChoice)}
-              >
-                <option value="X">Accel X</option>
-                <option value="Y">Accel Y</option>
-                <option value="Z">Accel Z</option>
-                <option value="Mag">Magnitude (||accel||)</option>
-              </select>
-            </Field>
-
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-medium text-gray-600">Harmonics</span>
-                <span className="flex gap-1">
-                  <button onClick={selectAllHarmonics} className="text-xs text-indigo-600 hover:text-indigo-800">All</button>
-                  <span className="text-xs text-gray-300">|</span>
-                  <button onClick={selectNoneHarmonics} className="text-xs text-indigo-600 hover:text-indigo-800">None</button>
-                </span>
-              </div>
-              <div className="space-y-0.5 max-h-64 overflow-auto">
-                {(initData?.harm_mults ?? config.harm_mults).map((mult, i) => {
-                  const isSpindle = initData ? mult === 1 : false;
-                  const isToothPass = initData ? mult === initData.z : false;
-                  const isBold = isSpindle || isToothPass;
-                  const freq = initData ? (initData.spindle_freq * mult).toFixed(0) : "?";
-                  let suffix = "";
-                  if (isSpindle) suffix = " · spindle";
-                  if (isToothPass) suffix = " · tooth-pass";
-
-                  return (
-                    <label
-                      key={mult}
-                      className={`flex items-center gap-2 text-sm cursor-pointer hover:bg-gray-50 px-1 py-0.5 rounded ${
-                        isBold ? "font-semibold" : ""
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={visibleHarmonics.has(i)}
-                        onChange={() => toggleHarmonic(i)}
-                        className="rounded text-indigo-600"
-                      />
-                      <span className="flex-1">
-                        {mult}×fg
-                        <span className="text-xs text-gray-400 ml-1">({freq} Hz)</span>
-                        {suffix && <span className="text-xs text-indigo-500 ml-1">{suffix}</span>}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        </Card>
-
-        {/* Harmonic chart */}
-        <Card className="lg:col-span-3">
-          <div ref={harmRef} className="plotly-chart" />
-        </Card>
-      </div>
+      <Card>
+        <div ref={snapshotRef} className="plotly-chart" />
+      </Card>
     </div>
   );
 }

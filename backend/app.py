@@ -13,8 +13,13 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.model_selection import train_test_split
 
 from .data import PARAM_KEYS, load_samples, resolve_data_dir
-from .harmonics import compute_harmonics_with_mag
-from .model import HarmonicBreakNet
+from .harmonics import (
+    CHANNEL_NAMES,
+    DEFAULT_CHANNELS,
+    PAIR_FEATURE_DIM,
+    compute_peak_pairs,
+)
+from .model import HarmonicPairBreakNet
 from .trainer import Trainer
 
 # ---------------------------------------------------------------------------
@@ -25,8 +30,11 @@ class PipelineConfig(BaseModel):
     data_dir: str = "../lfl/testdata"
     fft_window: int = 4096
     fft_step: int = 4096
-    harm_mults: list[int] = [1, 2, 3, 4, 6, 8, 10]
+    sample_rate: float = 4096.0
+    k_peaks: int = 5
+    f_max_rel: float | None = 12.0   # ignore peaks above 12x spindle by default
     cnn_window: int = 16
+    pair_embed_dim: int = 16
     conv_channels: list[int] = [16, 16]
     fc_hidden: int = 32
     kernel_size: int = 5
@@ -38,12 +46,12 @@ class TrainRequest(BaseModel):
     val_split: float = 0.15
     lr_schedule: list[dict]
     batch_size: int = 16
-    patience: int = 0  # 0 disables early stopping
-    n_windows: int = 1  # windows per sample per epoch
+    patience: int = 0
+    n_windows: int = 1
 
 
 class EvalRequest(BaseModel):
-    source: str = "test_set"          # "test_set" or "folders"
+    source: str = "test_set"
     folders: list[str] = []
     window_position: float = 0.5
 
@@ -61,7 +69,7 @@ class AppState:
             self.device = torch.device("cuda")
         else:
             self.device = torch.device("cpu")
-        self.model: Optional[HarmonicBreakNet] = None
+        self.model: Optional[HarmonicPairBreakNet] = None
         self.trainer = Trainer()
         self.train_samples: list[dict] = []
         self.val_samples: list[dict] = []
@@ -71,10 +79,29 @@ class AppState:
 state = AppState()
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _extract_pairs(sample: dict, cfg: PipelineConfig) -> np.ndarray:
+    """Compute the (T, C, K, 2) peak-pair tensor for a sample in place-style."""
+    fg = float(sample["params"][PARAM_KEYS.index("n")]) / 60.0
+    return compute_peak_pairs(
+        sample["accel"],
+        fg=fg,
+        fft_win=cfg.fft_window,
+        fft_step=cfg.fft_step,
+        k_peaks=cfg.k_peaks,
+        sample_rate=cfg.sample_rate,
+        channels=DEFAULT_CHANNELS,
+        f_max_rel=cfg.f_max_rel,
+    )
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="ToolBreak Harmonic Pipeline")
+app = FastAPI(title="ToolBreak Pair-Input Pipeline")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -94,12 +121,12 @@ def get_config():
     cfg["data_dir"] = resolve_data_dir(state.config.data_dir)
     cfg["device"] = str(state.device)
     cfg["model_loaded"] = state.model is not None
+    cfg["channel_names"] = CHANNEL_NAMES
     return cfg
 
 
 @app.post("/api/config")
 def set_config(config: PipelineConfig):
-    # Validate: cnn_window must survive all pooling layers
     t = config.cnn_window
     for _ in config.conv_channels:
         t = t // 2
@@ -107,6 +134,38 @@ def set_config(config: PipelineConfig):
         return {"error": f"cnn_window={config.cnn_window} too small for {len(config.conv_channels)} pool layers"}
     state.config = config
     return {"status": "ok"}
+
+
+@app.get("/api/model/weights")
+def get_model_weights():
+    """Diagnostics for the per-pair encoder + cutting-param standardisation.
+
+    The new architecture has no global W matrix; the closest analogue is the
+    shared per-pair MLP. We expose:
+      - The first-layer weights of `pair_encoder` (shape (D, 2)) so the UI can
+        plot how the encoder reads (f_rel, amp) pairs.
+      - The standardisation stats for cutting parameters.
+    """
+    if state.model is None:
+        return {"error": "No model loaded. Train first."}
+    m = state.model
+    enc = m.pair_encoder
+    # First Linear layer: (pair_embed_dim, pair_in_dim).
+    first = enc[0]
+    W1 = first.weight.detach().cpu().numpy()
+    b1 = first.bias.detach().cpu().numpy()
+    return {
+        "pair_encoder_W1": W1.tolist(),     # (D, 2)
+        "pair_encoder_b1": b1.tolist(),     # (D,)
+        "pair_input_labels": ["f_rel", "amp"],
+        "pair_embed_dim": int(W1.shape[0]),
+        "param_mean": m.param_mean.detach().cpu().numpy().tolist(),
+        "param_std": m.param_std.detach().cpu().numpy().tolist(),
+        "param_keys": PARAM_KEYS,
+        "channel_names": CHANNEL_NAMES,
+        "k_peaks": int(m.k_peaks),
+        "n_channels": int(m.n_channels),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -165,28 +224,20 @@ def start_training(req: TrainRequest):
     cfg = state.config
     data_dir = resolve_data_dir(cfg.data_dir)
 
-    # If no model exists, we need to create one and prepare data
     need_new_model = state.model is None
 
     if need_new_model or not state.train_samples:
         samples = load_samples(data_dir, req.folders)
         if len(samples) < 2:
-            return {"error": f"Need ≥2 samples, got {len(samples)}"}
+            return {"error": f"Need >=2 samples, got {len(samples)}"}
 
-        # Compute harmonics (XYZ + magnitude channel)
         for s in samples:
-            fg = s["params"][4] / 60.0
-            s["harmonics"] = compute_harmonics_with_mag(
-                s["accel"], fg, cfg.harm_mults,
-                fft_win=cfg.fft_window, fft_step=cfg.fft_step,
-            )
+            s["pairs"] = _extract_pairs(s, cfg)
 
-        # Filter out samples too short after FFT
-        samples = [s for s in samples if s["harmonics"].shape[0] >= cfg.cnn_window]
+        samples = [s for s in samples if s["pairs"].shape[0] >= cfg.cnn_window]
         if len(samples) < 2:
-            return {"error": "Not enough samples with sufficient harmonic time steps"}
+            return {"error": "Not enough samples with sufficient time steps"}
 
-        # Train/test split
         labels = [s["broke"] for s in samples]
         n_classes = len(set(labels))
         kwargs = dict(test_size=req.test_split, random_state=42)
@@ -197,8 +248,6 @@ def start_training(req: TrainRequest):
         trainval_samples = [samples[i] for i in trainval_idx]
         state.test_samples = [samples[i] for i in test_idx]
 
-        # Carve a validation set out of the train portion (stratified, same seed
-        # so it is reproducible across re-trains on the same data).
         if req.val_split > 0 and len(trainval_samples) >= 4:
             tv_labels = [s["broke"] for s in trainval_samples]
             v_kwargs = dict(test_size=req.val_split, random_state=42)
@@ -212,10 +261,11 @@ def start_training(req: TrainRequest):
             state.val_samples = []
 
     if need_new_model:
-        # Create model. n_harm_features = 4 * n_mults: X, Y, Z, |accel|.
-        n_harm_features = len(cfg.harm_mults) * 4
-        state.model = HarmonicBreakNet(
-            n_harm_features=n_harm_features,
+        state.model = HarmonicPairBreakNet(
+            n_channels=len(DEFAULT_CHANNELS),
+            k_peaks=cfg.k_peaks,
+            pair_in_dim=PAIR_FEATURE_DIM,
+            pair_embed_dim=cfg.pair_embed_dim,
             n_params=len(PARAM_KEYS),
             cnn_window=cfg.cnn_window,
             conv_channels=cfg.conv_channels,
@@ -223,7 +273,6 @@ def start_training(req: TrainRequest):
             ks=cfg.kernel_size,
         ).to(state.device)
 
-        # Standardization stats from the training split only (avoid test leakage).
         train_params = np.stack([s["params"] for s in state.train_samples])
         state.model.set_param_stats(
             torch.tensor(train_params.mean(axis=0), dtype=torch.float32),
@@ -281,7 +330,6 @@ def reset_model():
 
 @app.get("/api/train/test_files")
 def get_test_files():
-    """Return the list of files in the current test set."""
     if not state.test_samples:
         return {"files": []}
     files = []
@@ -300,11 +348,10 @@ def get_test_files():
 
 
 # ---------------------------------------------------------------------------
-# Evaluation endpoint
+# Evaluation
 # ---------------------------------------------------------------------------
 
 def _evaluate_samples(samples: list[dict], cfg: PipelineConfig, window_position: float):
-    """Run inference on a list of samples (must have 'harmonics' key)."""
     model = state.model
     if model is None:
         return None, "No model loaded. Train first."
@@ -314,22 +361,21 @@ def _evaluate_samples(samples: list[dict], cfg: PipelineConfig, window_position:
     inference_times: list[float] = []
     with torch.no_grad():
         for s in samples:
-            T = s["harmonics"].shape[0]
+            T = s["pairs"].shape[0]
             if T < cfg.cnn_window:
                 continue
             max_start = T - cfg.cnn_window
             start = int(max_start * window_position)
-            hw = s["harmonics"][start : start + cfg.cnn_window]
-            ht = torch.tensor(hw).unsqueeze(0).to(state.device)
-            pt = torch.tensor(s["params"]).unsqueeze(0).to(state.device)
+            pw = s["pairs"][start : start + cfg.cnn_window]
+            pt_pairs = torch.tensor(pw).unsqueeze(0).to(state.device)
+            pt_params = torch.tensor(s["params"]).unsqueeze(0).to(state.device)
 
             t0 = time.perf_counter()
-            logit = model(ht, pt).item()
+            logit = model(pt_pairs, pt_params).item()
             t1 = time.perf_counter()
             inference_times.append((t1 - t0) * 1000)
 
             prob = torch.sigmoid(torch.tensor(logit)).item()
-
             folder = os.path.basename(os.path.dirname(s["file"]))
             filename = os.path.basename(s["file"])
             results.append({
@@ -344,13 +390,11 @@ def _evaluate_samples(samples: list[dict], cfg: PipelineConfig, window_position:
 
     true_labels = [r["true_label"] for r in results]
     preds = [r["predicted"] for r in results]
-
     cm = confusion_matrix(true_labels, preds, labels=[0, 1]).tolist()
     report = classification_report(
         true_labels, preds, target_names=["OK", "Broke"], output_dict=True, zero_division=0,
     )
     acc = accuracy_score(true_labels, preds)
-
     return {
         "results": results,
         "confusion_matrix": cm,
@@ -376,11 +420,7 @@ def evaluate(req: EvalRequest):
         data_dir = resolve_data_dir(cfg.data_dir)
         samples = load_samples(data_dir, req.folders)
         for s in samples:
-            fg = s["params"][4] / 60.0
-            s["harmonics"] = compute_harmonics_with_mag(
-                s["accel"], fg, cfg.harm_mults,
-                fft_win=cfg.fft_window, fft_step=cfg.fft_step,
-            )
+            s["pairs"] = _extract_pairs(s, cfg)
         result, err = _evaluate_samples(samples, cfg, req.window_position)
 
     if err:
@@ -450,81 +490,67 @@ async def simulate(websocket: WebSocket):
         params = np.array([d.get(k, 0) for k in PARAM_KEYS], dtype=np.float32)
         broke = bool(d.get("break", False))
 
-        fg = params[4] / 60.0
-        z = int(params[1])
-        # Full input the model sees: X, Y, Z, |accel| harmonics concatenated.
-        harmonics_full = compute_harmonics_with_mag(
-            accel, fg, cfg.harm_mults,
-            fft_win=cfg.fft_window, fft_step=cfg.fft_step,
-        )
-        n_h = len(cfg.harm_mults)
-        harmonics = harmonics_full[:, : 3 * n_h]   # XYZ portion (frontend chart)
-        mag_harmonics = harmonics_full[:, 3 * n_h :]  # magnitude portion (frontend chart)
+        fg = float(params[PARAM_KEYS.index("n")]) / 60.0
 
-        T = harmonics_full.shape[0]
+        pairs = compute_peak_pairs(
+            accel,
+            fg=fg,
+            fft_win=cfg.fft_window,
+            fft_step=cfg.fft_step,
+            k_peaks=cfg.k_peaks,
+            sample_rate=cfg.sample_rate,
+            channels=DEFAULT_CHANNELS,
+            f_max_rel=cfg.f_max_rel,
+        )
+
+        T = pairs.shape[0]
         if T == 0:
-            await websocket.send_json({"type": "error", "message": "No harmonic time steps"})
+            await websocket.send_json({"type": "error", "message": "No time steps"})
             return
 
         state.model.eval()
-        W_np = state.model.W.detach().cpu().numpy()
-        b_np = state.model.b.detach().cpu().numpy()
-        mean_np = state.model.param_mean.detach().cpu().numpy()
-        std_np = state.model.param_std.detach().cpu().numpy()
-        params_std = (params - mean_np) / std_np
-        w_vec = params_std @ W_np.T + b_np
-
-        ch_names = ["X", "Y", "Z"]
-        harm_labels = [f"{ch}·{m}×fg" for ch in ch_names for m in cfg.harm_mults]
-        mag_harm_labels = [f"Mag·{m}×fg" for m in cfg.harm_mults]
 
         await websocket.send_json({
             "type": "init",
             "total_steps": T,
-            "n_features": int(harmonics_full.shape[1]),
-            "harm_labels": harm_labels,
-            "mag_harm_labels": mag_harm_labels,
-            "harm_mults": cfg.harm_mults,
-            "spindle_freq": float(fg),
-            "z": z,
+            "n_channels": len(DEFAULT_CHANNELS),
+            "k_peaks": cfg.k_peaks,
+            "channel_names": CHANNEL_NAMES,
+            "spindle_freq": fg,
             "cnn_window": cfg.cnn_window,
             "broke": broke,
             "params": {k: float(v) for k, v in zip(PARAM_KEYS, params.tolist())},
             "file": file_path,
-            "w_vec": w_vec.tolist(),
+            "f_max_rel": cfg.f_max_rel,
         })
 
         for t in range(T):
             if control["stopped"]:
                 break
-
             while control["paused"] and not control["stopped"]:
                 await asyncio.sleep(0.05)
-
             if control["stopped"]:
                 break
-
-            combined = float(harmonics_full[t] @ w_vec)
 
             prob = None
             inference_ms = None
             if t >= cfg.cnn_window - 1:
                 with torch.no_grad():
-                    hw = harmonics_full[t - cfg.cnn_window + 1 : t + 1]
-                    ht = torch.tensor(hw).unsqueeze(0).to(state.device)
-                    pt = torch.tensor(params).unsqueeze(0).to(state.device)
+                    pw = pairs[t - cfg.cnn_window + 1 : t + 1]
+                    pt_pairs = torch.tensor(pw).unsqueeze(0).to(state.device)
+                    pt_params = torch.tensor(params).unsqueeze(0).to(state.device)
                     t0 = time.perf_counter()
-                    logit = state.model(ht, pt).item()
+                    logit = state.model(pt_pairs, pt_params).item()
                     t1 = time.perf_counter()
                     inference_ms = round((t1 - t0) * 1000, 3)
                     prob = float(torch.sigmoid(torch.tensor(logit)).item())
 
+            # pairs[t] is (C, K, 2). Send as nested lists; UI can plot per
+            # channel: amplitude vs (f_rel * fg) for each peak.
             await websocket.send_json({
                 "type": "step",
                 "t": t,
-                "harmonics": harmonics[t].tolist(),
-                "mag_harmonics": mag_harmonics[t].tolist(),
-                "combined": combined,
+                "pairs": pairs[t].tolist(),  # (C, K, 2)
                 "prob": prob,
                 "inference_ms": inference_ms,
             })
