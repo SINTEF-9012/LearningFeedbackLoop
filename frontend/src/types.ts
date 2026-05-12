@@ -12,7 +12,7 @@ export interface PipelineConfig {
 export const defaultConfig: PipelineConfig = {
   data_dir: "../lfl/testdata",
   fft_window: 4096,
-  fft_step: 1024,
+  fft_step: 4096,
   harm_mults: [1, 2, 3, 4, 6, 8, 10],
   cnn_window: 16,
   conv_channels: [16, 16],

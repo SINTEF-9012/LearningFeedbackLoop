@@ -13,7 +13,7 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.model_selection import train_test_split
 
 from .data import PARAM_KEYS, load_samples, resolve_data_dir
-from .harmonics import compute_harmonics
+from .harmonics import compute_harmonics_with_mag
 from .model import HarmonicBreakNet
 from .trainer import Trainer
 
@@ -24,7 +24,7 @@ from .trainer import Trainer
 class PipelineConfig(BaseModel):
     data_dir: str = "../lfl/testdata"
     fft_window: int = 4096
-    fft_step: int = 1024
+    fft_step: int = 4096
     harm_mults: list[int] = [1, 2, 3, 4, 6, 8, 10]
     cnn_window: int = 16
     conv_channels: list[int] = [16, 16]
@@ -169,10 +169,10 @@ def start_training(req: TrainRequest):
         if len(samples) < 2:
             return {"error": f"Need ≥2 samples, got {len(samples)}"}
 
-        # Compute harmonics
+        # Compute harmonics (XYZ + magnitude channel)
         for s in samples:
             fg = s["params"][4] / 60.0
-            s["harmonics"] = compute_harmonics(
+            s["harmonics"] = compute_harmonics_with_mag(
                 s["accel"], fg, cfg.harm_mults,
                 fft_win=cfg.fft_window, fft_step=cfg.fft_step,
             )
@@ -194,16 +194,23 @@ def start_training(req: TrainRequest):
         state.test_samples = [samples[i] for i in test_idx]
 
     if need_new_model:
-        # Create model
-        n_harm_features = len(cfg.harm_mults) * 3
+        # Create model. n_harm_features = 4 * n_mults: X, Y, Z, |accel|.
+        n_harm_features = len(cfg.harm_mults) * 4
         state.model = HarmonicBreakNet(
             n_harm_features=n_harm_features,
-            n_params=7,
+            n_params=len(PARAM_KEYS),
             cnn_window=cfg.cnn_window,
             conv_channels=cfg.conv_channels,
             fc_hidden=cfg.fc_hidden,
             ks=cfg.kernel_size,
         ).to(state.device)
+
+        # Standardization stats from the training split only (avoid test leakage).
+        train_params = np.stack([s["params"] for s in state.train_samples])
+        state.model.set_param_stats(
+            torch.tensor(train_params.mean(axis=0), dtype=torch.float32),
+            torch.tensor(train_params.std(axis=0), dtype=torch.float32),
+        )
 
     state.trainer.start(
         model=state.model,
@@ -346,7 +353,7 @@ def evaluate(req: EvalRequest):
         samples = load_samples(data_dir, req.folders)
         for s in samples:
             fg = s["params"][4] / 60.0
-            s["harmonics"] = compute_harmonics(
+            s["harmonics"] = compute_harmonics_with_mag(
                 s["accel"], fg, cfg.harm_mults,
                 fft_win=cfg.fft_window, fft_step=cfg.fft_step,
             )
@@ -421,26 +428,27 @@ async def simulate(websocket: WebSocket):
 
         fg = params[4] / 60.0
         z = int(params[1])
-        harmonics = compute_harmonics(
+        # Full input the model sees: X, Y, Z, |accel| harmonics concatenated.
+        harmonics_full = compute_harmonics_with_mag(
             accel, fg, cfg.harm_mults,
             fft_win=cfg.fft_window, fft_step=cfg.fft_step,
         )
+        n_h = len(cfg.harm_mults)
+        harmonics = harmonics_full[:, : 3 * n_h]   # XYZ portion (frontend chart)
+        mag_harmonics = harmonics_full[:, 3 * n_h :]  # magnitude portion (frontend chart)
 
-        # Also compute magnitude channel harmonics
-        mag = np.linalg.norm(accel, axis=1, keepdims=True).astype(np.float32)  # (N,1)
-        mag_harmonics = compute_harmonics(
-            mag, fg, cfg.harm_mults,
-            fft_win=cfg.fft_window, fft_step=cfg.fft_step,
-        )  # (T, n_harm)
-
-        T = harmonics.shape[0]
+        T = harmonics_full.shape[0]
         if T == 0:
             await websocket.send_json({"type": "error", "message": "No harmonic time steps"})
             return
 
         state.model.eval()
         W_np = state.model.W.detach().cpu().numpy()
-        w_vec = params @ W_np.T
+        b_np = state.model.b.detach().cpu().numpy()
+        mean_np = state.model.param_mean.detach().cpu().numpy()
+        std_np = state.model.param_std.detach().cpu().numpy()
+        params_std = (params - mean_np) / std_np
+        w_vec = params_std @ W_np.T + b_np
 
         ch_names = ["X", "Y", "Z"]
         harm_labels = [f"{ch}·{m}×fg" for ch in ch_names for m in cfg.harm_mults]
@@ -449,7 +457,7 @@ async def simulate(websocket: WebSocket):
         await websocket.send_json({
             "type": "init",
             "total_steps": T,
-            "n_features": int(harmonics.shape[1]),
+            "n_features": int(harmonics_full.shape[1]),
             "harm_labels": harm_labels,
             "mag_harm_labels": mag_harm_labels,
             "harm_mults": cfg.harm_mults,
@@ -472,13 +480,13 @@ async def simulate(websocket: WebSocket):
             if control["stopped"]:
                 break
 
-            combined = float(harmonics[t] @ w_vec)
+            combined = float(harmonics_full[t] @ w_vec)
 
             prob = None
             inference_ms = None
             if t >= cfg.cnn_window - 1:
                 with torch.no_grad():
-                    hw = harmonics[t - cfg.cnn_window + 1 : t + 1]
+                    hw = harmonics_full[t - cfg.cnn_window + 1 : t + 1]
                     ht = torch.tensor(hw).unsqueeze(0).to(state.device)
                     pt = torch.tensor(params).unsqueeze(0).to(state.device)
                     t0 = time.perf_counter()

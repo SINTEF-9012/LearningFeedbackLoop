@@ -6,7 +6,7 @@ def compute_harmonics(
     fg: float,
     harm_mults: list[int],
     fft_win: int = 4096,
-    fft_step: int = 1024,
+    fft_step: int = 4096,
 ) -> np.ndarray:
     """Compute harmonic magnitudes for each accel channel via sliding FFT.
 
@@ -37,3 +37,26 @@ def compute_harmonics(
                 if 0 < bin_idx < len(spectrum):
                     result[t, col] = spectrum[bin_idx]
     return result
+
+
+def compute_harmonics_with_mag(
+    accel: np.ndarray,
+    fg: float,
+    harm_mults: list[int],
+    fft_win: int = 4096,
+    fft_step: int = 4096,
+) -> np.ndarray:
+    """Compute harmonics for X/Y/Z channels plus the L2-norm (magnitude) channel.
+
+    The magnitude channel ``|accel|`` is rotation-invariant and gives the model a
+    view that does not depend on machine axis orientation. Each FFT window is
+    computed independently, so this is safe for live streaming (no cross-time
+    normalization).
+
+    Returns:
+        (T, (C+1)*len(harm_mults)) array. Columns are ordered:
+            [<X harmonics>, <Y harmonics>, <Z harmonics>, <Mag harmonics>].
+    """
+    mag = np.linalg.norm(accel, axis=1, keepdims=True).astype(accel.dtype)
+    accel_with_mag = np.concatenate([accel, mag], axis=1)
+    return compute_harmonics(accel_with_mag, fg, harm_mults, fft_win, fft_step)

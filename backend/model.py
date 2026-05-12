@@ -14,7 +14,7 @@ class HarmonicBreakNet(nn.Module):
     def __init__(
         self,
         n_harm_features: int = 21,
-        n_params: int = 7,
+        n_params: int = 5,
         cnn_window: int = 16,
         conv_channels: list[int] | None = None,
         fc_hidden: int = 32,
@@ -29,6 +29,12 @@ class HarmonicBreakNet(nn.Module):
         self.conv_channels_cfg = conv_channels
 
         self.W = nn.Parameter(torch.randn(n_harm_features, n_params) * 0.01)
+        self.b = nn.Parameter(torch.zeros(n_harm_features))
+
+        # Standardization stats for cutting parameters (filled via set_param_stats).
+        # Stored as buffers so they move with .to(device) and serialize with state_dict.
+        self.register_buffer("param_mean", torch.zeros(n_params))
+        self.register_buffer("param_std", torch.ones(n_params))
 
         pad = ks // 2
         layers: list[nn.Module] = []
@@ -57,15 +63,23 @@ class HarmonicBreakNet(nn.Module):
         self.relu = nn.ReLU()
         self.drop = nn.Dropout(0.5)
 
+    def set_param_stats(self, mean: torch.Tensor, std: torch.Tensor) -> None:
+        """Set standardization stats for cutting parameters (call after train split)."""
+        std = std.clone()
+        std[std < 1e-8] = 1.0
+        self.param_mean.copy_(mean.to(self.param_mean.device))
+        self.param_std.copy_(std.to(self.param_std.device))
+
     def forward(self, harmonics: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
         """
         Args:
             harmonics: (B, T, n_features)
-            params: (B, 7)
+            params: (B, n_params)  -- raw cutting parameters; standardized internally.
         Returns:
             logits: (B,)
         """
-        w = params @ self.W.T                              # (B, n_features)
+        params = (params - self.param_mean) / self.param_std
+        w = params @ self.W.T + self.b                     # (B, n_features)
         x = torch.einsum("btc,bc->bt", harmonics, w)       # (B, T)
         x = x.unsqueeze(1)                                  # (B, 1, T)
         x = self.conv(x)                                    # (B, ch, T')

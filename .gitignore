@@ -13,3 +13,5 @@ frontend/dist/
 .DS_Store
 *.swp
 *.swo
+
+AGENTS.md

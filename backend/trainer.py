@@ -53,6 +53,16 @@ class Trainer:
         self.current_stage = 0
         self.total_stages = 0
         self._thread: threading.Thread | None = None
+        # Persisted across calls so Adam's momentum (m, v) survives between
+        # successive "Train" clicks. Recreating Adam each time would reset the
+        # moment estimates and the first step would become ~lr * sign(grad),
+        # which can knock a converged model out of a sharp minimum and send
+        # the loss back to ~log(2). We rebuild only when explicitly reset
+        # (new model / new training session).
+        self._optimizer: torch.optim.Optimizer | None = None
+
+    def reset_optimizer(self):
+        self._optimizer = None
 
     def start(
         self,
@@ -71,6 +81,8 @@ class Trainer:
         if reset_history:
             self.history = []
             self.current_epoch = 0
+            # A fresh training session also gets a fresh optimizer.
+            self._optimizer = None
         self.total_epochs = self.current_epoch + sum(s["epochs"] for s in lr_schedule)
         self.total_stages = len(lr_schedule)
         self.current_stage = 0
@@ -99,7 +111,15 @@ class Trainer:
                 if self.should_stop:
                     break
                 self.current_stage = stage_idx + 1
-                optimizer = torch.optim.Adam(model.parameters(), lr=stage["lr"])
+
+                # Reuse a persistent Adam to keep momentum across stages and
+                # across separate calls to start(); just update the lr.
+                if self._optimizer is None:
+                    self._optimizer = torch.optim.Adam(model.parameters(), lr=stage["lr"])
+                else:
+                    for pg in self._optimizer.param_groups:
+                        pg["lr"] = stage["lr"]
+                optimizer = self._optimizer
 
                 for _epoch in range(stage["epochs"]):
                     if self.should_stop:

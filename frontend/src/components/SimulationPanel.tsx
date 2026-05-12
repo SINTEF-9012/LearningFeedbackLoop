@@ -293,12 +293,12 @@ export default function SimulationPanel({ config }: Props) {
   };
   const harmRef = usePlotly(harmTraces, harmLayout);
 
-  // W-vector bar charts (one per axis: X, Y, Z)
-  const wBarAxes = ["X", "Y", "Z"] as const;
-  const axisColors = { X: "#3b82f6", Y: "#10b981", Z: "#f59e0b" };
+  // W-vector bar charts (one per channel: X, Y, Z, Mag)
+  const wBarAxes = ["X", "Y", "Z", "Mag"] as const;
+  const axisColors = { X: "#3b82f6", Y: "#10b981", Z: "#f59e0b", Mag: "#8b5cf6" };
 
   const wBarData: Plotly.Data[][] = useMemo(() => {
-    if (!initData?.w_vec) return [[], [], []];
+    if (!initData?.w_vec) return [[], [], [], []];
     const nH = initData.harm_mults.length;
     const labels = initData.harm_mults.map((m) => `${m}×fg`);
     return wBarAxes.map((_, ai) => {
@@ -313,7 +313,7 @@ export default function SimulationPanel({ config }: Props) {
   }, [initData]);
 
   const wBarLayouts: Partial<Plotly.Layout>[] = wBarAxes.map((ax) => ({
-    title: { text: `w vector — Accel ${ax}`, font: { size: 13 } },
+    title: { text: `w vector — ${ax === "Mag" ? "||accel||" : `Accel ${ax}`}`, font: { size: 13 } },
     xaxis: { title: { text: "Harmonic" } },
     yaxis: { title: { text: "Weight" } },
     margin: { t: 40, r: 20, b: 50, l: 60 },
@@ -324,7 +324,8 @@ export default function SimulationPanel({ config }: Props) {
   const wBarRef0 = usePlotly(wBarData[0], wBarLayouts[0]);
   const wBarRef1 = usePlotly(wBarData[1], wBarLayouts[1]);
   const wBarRef2 = usePlotly(wBarData[2], wBarLayouts[2]);
-  const wBarRefs = [wBarRef0, wBarRef1, wBarRef2];
+  const wBarRef3 = usePlotly(wBarData[3], wBarLayouts[3]);
+  const wBarRefs = [wBarRef0, wBarRef1, wBarRef2, wBarRef3];
 
   const selFileInfo = fileSource === "folders"
     ? files.find((f) => f.name === selFile)

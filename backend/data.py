@@ -3,7 +3,7 @@ import os
 import glob
 import numpy as np
 
-PARAM_KEYS = ["d", "z", "ap", "ae", "n", "f", "vf"]
+PARAM_KEYS = ["d", "z", "n", "f", "vf"]
 
 
 def load_samples(data_dir: str, folders: list[str] | None = None) -> list[dict]:

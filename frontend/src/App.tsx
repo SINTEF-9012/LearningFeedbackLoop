@@ -86,18 +86,25 @@ export default function App() {
       {/* Main */}
       <main className="flex-1 overflow-auto">
         <div className="max-w-7xl mx-auto p-6 space-y-4">
-          {tab === "config" && (
+          {/* All panels stay mounted so their internal state (training progress,
+              plots, form inputs, simulation playback) persists across tab switches.
+              Inactive panels are hidden with CSS instead of unmounted. */}
+          <div hidden={tab !== "config"}>
             <ConfigPanel config={config} onChange={setConfig} />
-          )}
-          {tab === "training" && (
+          </div>
+          <div hidden={tab !== "training"}>
             <TrainingPanel
               config={config}
               onModelTrained={handleModelTrained}
               onModelReset={handleModelReset}
             />
-          )}
-          {tab === "simulation" && <SimulationPanel config={config} />}
-          {tab === "evaluation" && <EvaluationPanel config={config} />}
+          </div>
+          <div hidden={tab !== "simulation"}>
+            <SimulationPanel config={config} />
+          </div>
+          <div hidden={tab !== "evaluation"}>
+            <EvaluationPanel config={config} />
+          </div>
         </div>
       </main>
     </div>
