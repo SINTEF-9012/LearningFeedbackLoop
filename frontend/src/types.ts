@@ -39,6 +39,11 @@ export interface TrainStatus {
   current_stage: number;
   total_stages: number;
   history: number[];
+  val_history: number[];
+  best_val_loss: number | null;
+  best_epoch: number;
+  epochs_since_improve: number;
+  early_stopped: boolean;
 }
 
 export interface LRStage {

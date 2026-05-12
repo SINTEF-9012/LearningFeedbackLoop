@@ -45,8 +45,11 @@ export async function getTestFiles() {
 export async function startTraining(body: {
   folders: string[];
   test_split: number;
+  val_split: number;
   lr_schedule: LRStage[];
   batch_size: number;
+  patience: number;
+  n_windows: number;
 }) {
   return fetchJSON<any>("/api/train/start", {
     method: "POST",

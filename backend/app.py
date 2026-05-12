@@ -35,8 +35,11 @@ class PipelineConfig(BaseModel):
 class TrainRequest(BaseModel):
     folders: list[str]
     test_split: float = 0.2
+    val_split: float = 0.15
     lr_schedule: list[dict]
     batch_size: int = 16
+    patience: int = 0  # 0 disables early stopping
+    n_windows: int = 1  # windows per sample per epoch
 
 
 class EvalRequest(BaseModel):
@@ -61,6 +64,7 @@ class AppState:
         self.model: Optional[HarmonicBreakNet] = None
         self.trainer = Trainer()
         self.train_samples: list[dict] = []
+        self.val_samples: list[dict] = []
         self.test_samples: list[dict] = []
 
 
@@ -188,10 +192,24 @@ def start_training(req: TrainRequest):
         kwargs = dict(test_size=req.test_split, random_state=42)
         if n_classes >= 2:
             kwargs["stratify"] = labels
-        train_idx, test_idx = train_test_split(range(len(samples)), **kwargs)
+        trainval_idx, test_idx = train_test_split(range(len(samples)), **kwargs)
 
-        state.train_samples = [samples[i] for i in train_idx]
+        trainval_samples = [samples[i] for i in trainval_idx]
         state.test_samples = [samples[i] for i in test_idx]
+
+        # Carve a validation set out of the train portion (stratified, same seed
+        # so it is reproducible across re-trains on the same data).
+        if req.val_split > 0 and len(trainval_samples) >= 4:
+            tv_labels = [s["broke"] for s in trainval_samples]
+            v_kwargs = dict(test_size=req.val_split, random_state=42)
+            if len(set(tv_labels)) >= 2:
+                v_kwargs["stratify"] = tv_labels
+            train_idx2, val_idx2 = train_test_split(range(len(trainval_samples)), **v_kwargs)
+            state.train_samples = [trainval_samples[i] for i in train_idx2]
+            state.val_samples = [trainval_samples[i] for i in val_idx2]
+        else:
+            state.train_samples = trainval_samples
+            state.val_samples = []
 
     if need_new_model:
         # Create model. n_harm_features = 4 * n_mults: X, Y, Z, |accel|.
@@ -215,18 +233,23 @@ def start_training(req: TrainRequest):
     state.trainer.start(
         model=state.model,
         train_samples=state.train_samples,
+        val_samples=state.val_samples,
         lr_schedule=req.lr_schedule,
         cnn_window=cfg.cnn_window,
         device=state.device,
         batch_size=req.batch_size,
         reset_history=need_new_model,
+        patience=req.patience,
+        n_windows=req.n_windows,
     )
 
     return {
         "status": "started" if need_new_model else "continued",
         "n_train": len(state.train_samples),
+        "n_val": len(state.val_samples),
         "n_test": len(state.test_samples),
         "n_broke_train": sum(s["broke"] for s in state.train_samples),
+        "n_broke_val": sum(s["broke"] for s in state.val_samples),
         "n_broke_test": sum(s["broke"] for s in state.test_samples),
         "device": str(state.device),
         "n_params": sum(p.numel() for p in state.model.parameters()),
@@ -250,6 +273,7 @@ def reset_model():
         state.trainer.stop()
     state.model = None
     state.train_samples = []
+    state.val_samples = []
     state.test_samples = []
     state.trainer = Trainer()
     return {"status": "reset"}
