@@ -33,6 +33,62 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+class ParamConditionedPairEncoder(nn.Module):
+    """Per-pair MLP whose first linear layer is conditioned on machine params.
+
+    The first layer's effective weight matrix is
+
+        W_eff(p) = W0 + p @ M                  # shape (D, 2)
+
+    where ``W0`` is a parameter-independent baseline and ``M`` of shape
+    ``(D, n_params, 2)`` carries the per-parameter modulation. Standardised
+    machine parameters ``p`` (shape ``(B, n_params)``, zero-mean) thus tilt the
+    encoder's reading of each (f_rel, amp) pair, but the encoder still does
+    something sensible at the parameter centroid (``p ≈ 0``) thanks to ``W0``.
+
+    The second linear layer (``D -> D``) is parameter-independent.
+
+    Forward signature: ``(pairs, params_std) -> embedding`` where
+        pairs: (B, T, C, K, 2)
+        params_std: (B, n_params)
+        embedding: (B, T, C, K, D)
+    """
+
+    def __init__(self, pair_in_dim: int, pair_embed_dim: int, n_params: int):
+        super().__init__()
+        self.pair_in_dim = pair_in_dim
+        self.pair_embed_dim = pair_embed_dim
+        self.n_params = n_params
+
+        # Baseline first-layer weights (~Xavier-ish for fan-in=2).
+        self.W0 = nn.Parameter(torch.randn(pair_embed_dim, pair_in_dim) * (1.0 / pair_in_dim ** 0.5))
+        # Parameter modulation: small so training starts near the baseline
+        # encoder and M grows only if data-driven gradients say it should.
+        self.M = nn.Parameter(torch.randn(pair_embed_dim, n_params, pair_in_dim) * 0.01)
+        self.b1 = nn.Parameter(torch.zeros(pair_embed_dim))
+
+        # Second layer is a plain Linear; ReLUs in forward.
+        self.linear2 = nn.Linear(pair_embed_dim, pair_embed_dim)
+
+    def forward(self, pairs: torch.Tensor, params_std: torch.Tensor) -> torch.Tensor:
+        # Effective per-sample first-layer weight: (B, D, 2). This is the same
+        # for every (t, c, k) in the sample — the machine parameters are a
+        # per-sample property, so the parameter-conditioned read of (f_rel,
+        # amp) is fixed across all pairs in a sample (and across all time
+        # steps in the window).
+        W_eff = torch.einsum("bp,dpi->bdi", params_std, self.M) + self.W0
+        # out[b, t, c, k, d] = sum_i W_eff[b, d, i] * pairs[b, t, c, k, i].
+        h = torch.einsum("bdi,btcki->btckd", W_eff, pairs) + self.b1
+        h = F.relu(h)
+        # Second linear layer — no ReLU afterwards. Leaving the output of the
+        # per-pair encoder linear-in-its-features gives the downstream
+        # DeepSets sum + Conv1d more room to add or subtract contributions
+        # without a non-negativity bottleneck.
+        h = self.linear2(h)
+        return h
 
 
 class HarmonicPairBreakNet(nn.Module):
@@ -56,6 +112,7 @@ class HarmonicPairBreakNet(nn.Module):
         self.k_peaks = k_peaks
         self.pair_in_dim = pair_in_dim
         self.pair_embed_dim = pair_embed_dim
+        self.n_params = n_params
         self.cnn_window = cnn_window
         self.conv_channels_cfg = conv_channels
 
@@ -63,12 +120,13 @@ class HarmonicPairBreakNet(nn.Module):
         self.register_buffer("param_mean", torch.zeros(n_params))
         self.register_buffer("param_std", torch.ones(n_params))
 
-        # Per-pair encoder: shared 2-layer MLP over (f_rel, amp).
-        self.pair_encoder = nn.Sequential(
-            nn.Linear(pair_in_dim, pair_embed_dim),
-            nn.ReLU(),
-            nn.Linear(pair_embed_dim, pair_embed_dim),
-            nn.ReLU(),
+        # Per-pair encoder is now parameter-conditioned at its first layer.
+        # Machine parameters reshape how each (f_rel, amp) is read; they no
+        # longer enter only at the FC head.
+        self.pair_encoder = ParamConditionedPairEncoder(
+            pair_in_dim=pair_in_dim,
+            pair_embed_dim=pair_embed_dim,
+            n_params=n_params,
         )
 
         # Temporal CNN over the per-channel embedding stream.
@@ -92,8 +150,8 @@ class HarmonicPairBreakNet(nn.Module):
             t_out = t_out // 2
         flat = ch * t_out
 
-        # FC head, conditioned on standardised cutting parameters.
-        self.fc1 = nn.Linear(flat + n_params, fc_hidden)
+        # FC head NO LONGER takes raw params — they already shaped the encoder.
+        self.fc1 = nn.Linear(flat, fc_hidden)
         self.bn1 = nn.BatchNorm1d(fc_hidden)
         self.fc2 = nn.Linear(fc_hidden, fc_hidden)
         self.bn2 = nn.BatchNorm1d(fc_hidden)
@@ -115,26 +173,25 @@ class HarmonicPairBreakNet(nn.Module):
         Returns:
             logits: (B,)
         """
-        B, T, C, K, F = pairs.shape
-        # Encode every pair through the shared MLP. Reshape so the encoder sees
-        # a flat batch of pairs and we don't allocate any intermediate copies
-        # of (f_rel, amp) per pair.
-        e = self.pair_encoder(pairs.reshape(B * T * C * K, F))
-        e = e.reshape(B, T, C, K, self.pair_embed_dim)
+        B, T, C, K, Fdim = pairs.shape
 
-        # DeepSets aggregation over K peaks (sum); preserves "louder => bigger".
-        e = e.sum(dim=3)                    # (B, T, C, D)
-        e = e.reshape(B, T, C * self.pair_embed_dim)  # (B, T, F)
+        # Standardise once and feed the same vector to the encoder.
+        params_std = (params - self.param_mean) / self.param_std
+
+        # Per-pair, parameter-conditioned encoding.
+        e = self.pair_encoder(pairs, params_std)        # (B, T, C, K, D)
+
+        # DeepSets aggregation over K peaks.
+        e = e.sum(dim=3)                                # (B, T, C, D)
+        e = e.reshape(B, T, C * self.pair_embed_dim)     # (B, T, F)
 
         # Conv1d expects (B, F, T).
         x = e.transpose(1, 2)
         x = self.conv(x)
         x = x.flatten(1)
 
-        # Concatenate standardised cutting parameters at the FC head.
-        p = (params - self.param_mean) / self.param_std
-        x = torch.cat([x, p], dim=1)
-
+        # No param concat here: machine parameters were already injected via
+        # the parameter-conditioned first layer of the per-pair encoder.
         x = self.drop(self.relu(self.bn1(self.fc1(x))))
         x = self.drop(self.relu(self.bn2(self.fc2(x))))
         return self.fc3(x).squeeze(-1)

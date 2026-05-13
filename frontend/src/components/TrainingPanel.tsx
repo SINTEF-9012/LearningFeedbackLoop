@@ -162,71 +162,112 @@ export default function TrainingPanel({ config, onModelTrained, onModelReset }: 
     wasRunningRef.current = running;
   }, [status?.running, refreshWeights]);
 
-  // Per-pair encoder first-layer weights: shape (D, 2). Each row is one
-  // hidden neuron's reading of (f_rel, amp). Together they form the basis
-  // the model uses to encode a single (frequency, amplitude) peak.
+  // Per-pair encoder first-layer weights are now parameter-conditioned:
+  //     W_eff(p) = W0 + p @ M
+  // We visualise:
+  //   - W0  (D, 2): the baseline reading of a pair at the parameter centroid.
+  //   - For each cutting parameter p, M[:, p, :] (D, 2): how that parameter
+  //     tilts the baseline reading of (f_rel, amp).
   const wHeatmapData: Plotly.Data[] = useMemo(() => {
     if (!weights) return [];
-    const absMax = weights.pair_encoder_W1.reduce(
+    const absMax = weights.pair_encoder_W0.reduce(
       (m, row) => Math.max(m, ...row.map((v) => Math.abs(v))), 0
     ) || 1;
     return [{
-      z: weights.pair_encoder_W1,
+      z: weights.pair_encoder_W0,
       x: weights.pair_input_labels,
-      y: weights.pair_encoder_W1.map((_, i) => `n${i}`),
+      y: weights.pair_encoder_W0.map((_, i) => `n${i}`),
       type: "heatmap" as const,
       colorscale: "RdBu",
       reversescale: true,
       zmin: -absMax,
       zmax: absMax,
-      colorbar: { title: { text: "W" } },
-      hovertemplate: "neuron %{y} \u2190 %{x}<br>W = %{z:.4f}<extra></extra>",
+      colorbar: { title: { text: "W\u2080" } },
+      hovertemplate: "neuron %{y} \u2190 %{x}<br>W\u2080 = %{z:.4f}<extra></extra>",
     }];
   }, [weights]);
 
   const wHeatmapLayout: Partial<Plotly.Layout> = useMemo(() => ({
-    title: { text: "Pair encoder W\u2081 \u2014 hidden neurons \u2190 (f_rel, amp)", font: { size: 13 } },
+    title: { text: "Baseline W\u2080 \u2014 encoder reading of (f_rel, amp) at parameter centroid", font: { size: 13 } },
     xaxis: { title: { text: "Pair input" }, side: "top" },
     yaxis: { title: { text: "Hidden neuron" }, autorange: "reversed" },
     margin: { t: 60, r: 20, b: 40, l: 80 },
-    height: weights ? Math.max(280, 14 * weights.pair_encoder_W1.length + 80) : 280,
+    height: weights ? Math.max(280, 14 * weights.pair_encoder_W0.length + 80) : 280,
   }), [weights]);
   const wHeatmapRef = usePlotly(wHeatmapData, wHeatmapLayout);
 
-  // Sample the encoder over a small (f_rel, amp) grid to show what feature
-  // each neuron responds to. We use only the first linear layer + ReLU as
-  // a quick sketch of selectivity; later layers compose these.
-  const encoderResponseData: Plotly.Data[] = useMemo(() => {
+  // Per-parameter modulation: one heatmap per cutting parameter, shape (D, 2).
+  // Combine them as subplots in a single Plotly figure (side-by-side).
+  const modulationData: Plotly.Data[] = useMemo(() => {
     if (!weights) return [];
-    const W1 = weights.pair_encoder_W1;
-    const b1 = weights.pair_encoder_b1;
-    const D = W1.length;
-    // Pick a few representative neurons (first 6 by output norm of W1 row)
-    const norms = W1.map((row, i) => ({ i, n: Math.hypot(row[0], row[1]) }));
-    norms.sort((a, b) => b.n - a.n);
-    const picks = norms.slice(0, Math.min(6, D)).map((p) => p.i);
-    // For each picked neuron, sample over f_rel ∈ [0.5, 12], amp normalized 1.
-    const fGrid = Array.from({ length: 60 }, (_, i) => 0.5 + i * (12 - 0.5) / 59);
-    const palette = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ef4444", "#06b6d4"];
-    return picks.map((idx, k) => ({
-      x: fGrid,
-      y: fGrid.map((f) => Math.max(0, W1[idx][0] * f + W1[idx][1] * 1.0 + b1[idx])),
-      type: "scatter" as const,
-      mode: "lines" as const,
-      name: `n${idx}`,
-      line: { color: palette[k % palette.length], width: 1.5 },
-    }));
+    const M = weights.pair_encoder_M; // (D, P, 2)
+    const D = M.length;
+    const P = weights.param_keys.length;
+    // Global symmetric color scale across all parameter slices so they are
+    // visually comparable.
+    let absMax = 0;
+    for (let d = 0; d < D; d++)
+      for (let p = 0; p < P; p++)
+        for (let i = 0; i < 2; i++)
+          absMax = Math.max(absMax, Math.abs(M[d][p][i]));
+    absMax = absMax || 1;
+    return weights.param_keys.map((pk, pi) => {
+      const z: number[][] = M.map((dRow) => dRow[pi]); // (D, 2)
+      return {
+        z,
+        x: weights.pair_input_labels,
+        y: M.map((_, i) => `n${i}`),
+        type: "heatmap" as const,
+        colorscale: "RdBu",
+        reversescale: true,
+        zmin: -absMax,
+        zmax: absMax,
+        xaxis: `x${pi + 1}`,
+        yaxis: `y${pi + 1}`,
+        showscale: pi === P - 1,
+        colorbar: pi === P - 1 ? { title: { text: "M" } } : undefined,
+        hovertemplate: `${pk}: neuron %{y} \u2190 %{x}<br>M = %{z:.4f}<extra></extra>`,
+        name: pk,
+      };
+    });
   }, [weights]);
 
-  const encoderResponseLayout: Partial<Plotly.Layout> = {
-    title: { text: "Encoder neuron response (amp = 1, varying f_rel) \u2014 ReLU(W\u2081·[f_rel, 1] + b\u2081)", font: { size: 13 } },
-    xaxis: { title: { text: "f_rel = f / fg" } },
-    yaxis: { title: { text: "Activation" }, zeroline: true, zerolinecolor: "#9ca3af" },
-    margin: { t: 40, r: 20, b: 50, l: 60 },
-    height: 320,
-    legend: { orientation: "h", y: -0.25 },
-  };
-  const wColumnsRef = usePlotly(encoderResponseData, encoderResponseLayout);
+  const modulationLayout: Partial<Plotly.Layout> = useMemo(() => {
+    if (!weights) return {};
+    const P = weights.param_keys.length;
+    const grid: any = { rows: 1, columns: P, pattern: "independent" };
+    const layout: any = {
+      title: { text: "Parameter modulation M[:, p, :] \u2014 how each cutting parameter tilts the encoder", font: { size: 13 } },
+      grid,
+      margin: { t: 70, r: 40, b: 50, l: 60 },
+      height: Math.max(300, 14 * weights.pair_encoder_W0.length + 90),
+      annotations: weights.param_keys.map((pk, pi) => ({
+        text: pk,
+        x: (pi + 0.5) / P,
+        y: 1.04,
+        xref: "paper",
+        yref: "paper",
+        xanchor: "center",
+        showarrow: false,
+        font: { size: 12, color: "#374151" },
+      })),
+    };
+    for (let pi = 0; pi < P; pi++) {
+      const key = pi === 0 ? "" : String(pi + 1);
+      layout[`xaxis${key}`] = {
+        title: { text: pi === 0 ? "input" : "" },
+        side: "bottom",
+        showticklabels: pi === 0,
+      };
+      layout[`yaxis${key}`] = {
+        autorange: "reversed",
+        showticklabels: pi === 0,
+        title: pi === 0 ? { text: "neuron" } : undefined,
+      };
+    }
+    return layout;
+  }, [weights]);
+  const wColumnsRef = usePlotly(modulationData, modulationLayout);
 
   const isTraining = status?.running ?? false;
   const progress = status ? Math.round((status.current_epoch / Math.max(status.total_epochs, 1)) * 100) : 0;
@@ -437,12 +478,14 @@ export default function TrainingPanel({ config, onModelTrained, onModelReset }: 
           <div className="space-y-4">
             <div className="flex items-start justify-between gap-4">
               <p className="text-xs text-gray-500 flex-1">
-                Each (frequency, amplitude) peak is fed through a shared MLP. The first
-                layer has weights of shape ({weights.pair_encoder_W1.length} hidden ×{" "}
-                {weights.pair_input_labels.length} inputs). The heatmap shows raw
-                weights; the lower chart sweeps each strong neuron over a range of
-                f<sub>rel</sub> with amplitude fixed at 1, so you can see which
-                neurons are tuned to which spectral region.
+                Each (frequency, amplitude) peak is fed through a per-pair MLP whose
+                first layer is <em>conditioned on the machine parameters</em>:
+                {" "}<code>W_eff(p) = W\u2080 + p \u00b7 M</code>. The baseline{" "}
+                <code>W\u2080</code> ({weights.pair_encoder_W0.length} × 2) is what
+                the encoder reads when the parameters sit at the training mean.
+                The modulation tensor <code>M</code> ({weights.pair_encoder_W0.length}
+                {" "}× {weights.n_params} × 2) shows how each cutting parameter
+                tilts that reading toward (f_rel, amp).
               </p>
               <button
                 onClick={refreshWeights}

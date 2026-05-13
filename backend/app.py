@@ -138,33 +138,39 @@ def set_config(config: PipelineConfig):
 
 @app.get("/api/model/weights")
 def get_model_weights():
-    """Diagnostics for the per-pair encoder + cutting-param standardisation.
+    """Diagnostics for the parameter-conditioned per-pair encoder.
 
-    The new architecture has no global W matrix; the closest analogue is the
-    shared per-pair MLP. We expose:
-      - The first-layer weights of `pair_encoder` (shape (D, 2)) so the UI can
-        plot how the encoder reads (f_rel, amp) pairs.
-      - The standardisation stats for cutting parameters.
+    The per-pair encoder's first linear layer has an effective weight matrix
+    ``W_eff(p) = W0 + p @ M`` where:
+      - ``W0`` of shape ``(D, 2)`` is the baseline reading of a (f_rel, amp)
+        pair when the machine parameters sit at their training mean (since p
+        is standardised).
+      - ``M`` of shape ``(D, n_params, 2)`` is the parameter modulation: each
+        slice ``M[:, p, :]`` says how cutting parameter ``p`` tilts the
+        baseline reading of (f_rel, amp).
+
+    We expose both so the UI can show per-parameter modulation heatmaps.
     """
     if state.model is None:
         return {"error": "No model loaded. Train first."}
     m = state.model
     enc = m.pair_encoder
-    # First Linear layer: (pair_embed_dim, pair_in_dim).
-    first = enc[0]
-    W1 = first.weight.detach().cpu().numpy()
-    b1 = first.bias.detach().cpu().numpy()
+    W0 = enc.W0.detach().cpu().numpy()         # (D, 2)
+    M = enc.M.detach().cpu().numpy()           # (D, n_params, 2)
+    b1 = enc.b1.detach().cpu().numpy()         # (D,)
     return {
-        "pair_encoder_W1": W1.tolist(),     # (D, 2)
-        "pair_encoder_b1": b1.tolist(),     # (D,)
+        "pair_encoder_W0": W0.tolist(),
+        "pair_encoder_M": M.tolist(),
+        "pair_encoder_b1": b1.tolist(),
         "pair_input_labels": ["f_rel", "amp"],
-        "pair_embed_dim": int(W1.shape[0]),
+        "pair_embed_dim": int(W0.shape[0]),
         "param_mean": m.param_mean.detach().cpu().numpy().tolist(),
         "param_std": m.param_std.detach().cpu().numpy().tolist(),
         "param_keys": PARAM_KEYS,
         "channel_names": CHANNEL_NAMES,
         "k_peaks": int(m.k_peaks),
         "n_channels": int(m.n_channels),
+        "n_params": int(M.shape[1]),
     }
 
 

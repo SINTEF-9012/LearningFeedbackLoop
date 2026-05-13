@@ -72,9 +72,10 @@ export async function resetModel() {
 }
 
 export interface ModelWeights {
-  pair_encoder_W1: number[][];   // (D, 2)
-  pair_encoder_b1: number[];     // (D,)
-  pair_input_labels: string[];   // ["f_rel", "amp"]
+  pair_encoder_W0: number[][];          // (D, 2)  baseline first-layer weights
+  pair_encoder_M: number[][][];         // (D, n_params, 2)  param modulation
+  pair_encoder_b1: number[];            // (D,)
+  pair_input_labels: string[];          // ["f_rel", "amp"]
   pair_embed_dim: number;
   param_mean: number[];
   param_std: number[];
@@ -82,6 +83,7 @@ export interface ModelWeights {
   channel_names: string[];
   k_peaks: number;
   n_channels: number;
+  n_params: number;
   error?: string;
 }
 
