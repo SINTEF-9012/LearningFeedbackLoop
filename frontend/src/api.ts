@@ -71,6 +71,30 @@ export async function resetModel() {
   return fetchJSON<any>("/api/train/reset", { method: "POST" });
 }
 
+export interface SavedModel {
+  name: string;
+  size_bytes: number;
+  mtime: number;
+}
+
+export async function listSavedModels() {
+  return fetchJSON<{ models: SavedModel[] }>("/api/model/list");
+}
+
+export async function saveModel(name: string) {
+  return fetchJSON<{ status?: string; name?: string; path?: string; error?: string }>(
+    "/api/model/save",
+    { method: "POST", body: JSON.stringify({ name }) }
+  );
+}
+
+export async function loadModel(name: string) {
+  return fetchJSON<{ status?: string; name?: string; error?: string }>(
+    "/api/model/load",
+    { method: "POST", body: JSON.stringify({ name }) }
+  );
+}
+
 export interface ModelWeights {
   pair_encoder_W0: number[][];          // (D, 2)  baseline first-layer weights
   pair_encoder_M: number[][][];         // (D, n_params, 2)  param modulation

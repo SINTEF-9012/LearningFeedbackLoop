@@ -29,6 +29,7 @@ from .of_replay import (
     list_ofs,
     load_of_stream,
     slice_by_window,
+    workspace_root,
 )
 from .trainer import Trainer
 
@@ -341,6 +342,119 @@ def reset_model():
     state.test_samples = []
     state.trainer = Trainer()
     return {"status": "reset"}
+
+
+# ---------------------------------------------------------------------------
+# Model save / load
+# ---------------------------------------------------------------------------
+
+MODELS_DIR = os.path.join(workspace_root(), "models")
+_SAFE_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+
+
+def _safe_model_name(name: str) -> str:
+    name = name.strip()
+    if not name:
+        raise ValueError("Empty model name")
+    if name.endswith(".pt"):
+        name = name[:-3]
+    if any(c not in _SAFE_NAME_CHARS for c in name):
+        raise ValueError("Model name may only contain letters, digits, '-', '_' and '.'")
+    return name
+
+
+class SaveModelRequest(BaseModel):
+    name: str
+
+
+class LoadModelRequest(BaseModel):
+    name: str
+
+
+@app.get("/api/model/list")
+def list_saved_models():
+    if not os.path.isdir(MODELS_DIR):
+        return {"models": []}
+    entries = []
+    for f in sorted(os.listdir(MODELS_DIR)):
+        if not f.endswith(".pt"):
+            continue
+        path = os.path.join(MODELS_DIR, f)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        entries.append({
+            "name": f[:-3],
+            "size_bytes": st.st_size,
+            "mtime": st.st_mtime,
+        })
+    return {"models": entries}
+
+
+@app.post("/api/model/save")
+def save_model(req: SaveModelRequest):
+    if state.model is None:
+        return {"error": "No model in memory. Train first."}
+    try:
+        name = _safe_model_name(req.name)
+    except ValueError as e:
+        return {"error": str(e)}
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    cfg = state.config
+    payload = {
+        "state_dict": {k: v.detach().cpu() for k, v in state.model.state_dict().items()},
+        "config": cfg.model_dump(),
+        "architecture": {
+            "n_channels": len(DEFAULT_CHANNELS),
+            "k_peaks": cfg.k_peaks,
+            "pair_in_dim": PAIR_FEATURE_DIM,
+            "pair_embed_dim": cfg.pair_embed_dim,
+            "n_params": len(PARAM_KEYS),
+            "cnn_window": cfg.cnn_window,
+            "conv_channels": cfg.conv_channels,
+            "fc_hidden": cfg.fc_hidden,
+            "kernel_size": cfg.kernel_size,
+        },
+        "param_keys": PARAM_KEYS,
+        "channel_names": [CHANNEL_NAMES[c] for c in DEFAULT_CHANNELS],
+    }
+    path = os.path.join(MODELS_DIR, f"{name}.pt")
+    torch.save(payload, path)
+    return {"status": "saved", "name": name, "path": os.path.relpath(path, workspace_root())}
+
+
+@app.post("/api/model/load")
+def load_saved_model(req: LoadModelRequest):
+    try:
+        name = _safe_model_name(req.name)
+    except ValueError as e:
+        return {"error": str(e)}
+    path = os.path.join(MODELS_DIR, f"{name}.pt")
+    if not os.path.isfile(path):
+        return {"error": f"Model '{name}' not found"}
+    payload = torch.load(path, map_location=state.device, weights_only=False)
+    arch = payload["architecture"]
+    cfg_dict = payload.get("config", {})
+    # Refresh config from saved values so downstream evaluation matches.
+    for k, v in cfg_dict.items():
+        if hasattr(state.config, k):
+            setattr(state.config, k, v)
+    model = HarmonicPairBreakNet(
+        n_channels=arch["n_channels"],
+        k_peaks=arch["k_peaks"],
+        pair_in_dim=arch["pair_in_dim"],
+        pair_embed_dim=arch["pair_embed_dim"],
+        n_params=arch["n_params"],
+        cnn_window=arch["cnn_window"],
+        conv_channels=arch["conv_channels"],
+        fc_hidden=arch["fc_hidden"],
+        kernel_size=arch["kernel_size"],
+    ).to(state.device)
+    model.load_state_dict(payload["state_dict"])
+    model.eval()
+    state.model = model
+    return {"status": "loaded", "name": name}
 
 
 @app.get("/api/train/test_files")

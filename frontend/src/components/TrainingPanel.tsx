@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import type Plotly from "plotly.js";
 import type { PipelineConfig, FolderInfo, LRStage, TrainStatus } from "../types";
-import { getFolders, startTraining, getTrainStatus, stopTraining, resetModel, setConfig, getModelWeights, type ModelWeights } from "../api";
+import { getFolders, startTraining, getTrainStatus, stopTraining, resetModel, setConfig, getModelWeights, listSavedModels, saveModel, loadModel, type ModelWeights, type SavedModel } from "../api";
 import { Card, Field, inputClass, btnPrimary, btnDanger, btnSecondary, Badge, usePlotly } from "../ui";
 
 interface Props {
@@ -25,7 +25,42 @@ export default function TrainingPanel({ config, onModelTrained, onModelReset }: 
   const [status, setStatus] = useState<TrainStatus | null>(null);
   const [info, setInfo] = useState<any>(null);
   const [error, setError] = useState("");
+  const [savedModels, setSavedModels] = useState<SavedModel[]>([]);
+  const [saveName, setSaveName] = useState("");
+  const [selectedSaved, setSelectedSaved] = useState("");
+  const [modelMsg, setModelMsg] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval>>();
+
+  const refreshSavedModels = useCallback(async () => {
+    const d = await listSavedModels();
+    setSavedModels(d.models || []);
+  }, []);
+
+  useEffect(() => { refreshSavedModels(); }, [refreshSavedModels]);
+
+  const handleSaveModel = async () => {
+    setModelMsg("");
+    const res = await saveModel(saveName);
+    if (res.error) {
+      setModelMsg(`Save failed: ${res.error}`);
+      return;
+    }
+    setModelMsg(`Saved as ${res.name}.pt`);
+    setSaveName("");
+    refreshSavedModels();
+  };
+
+  const handleLoadModel = async () => {
+    setModelMsg("");
+    if (!selectedSaved) return;
+    const res = await loadModel(selectedSaved);
+    if (res.error) {
+      setModelMsg(`Load failed: ${res.error}`);
+      return;
+    }
+    setModelMsg(`Loaded ${res.name}.pt`);
+    onModelTrained();
+  };
 
   // Load folders
   useEffect(() => {
@@ -386,6 +421,47 @@ export default function TrainingPanel({ config, onModelTrained, onModelReset }: 
               <button className={btnSecondary} onClick={handleReset} disabled={isTraining}>
                 Reset Model
               </button>
+            </div>
+
+            <div className="pt-3 border-t border-gray-200 space-y-2">
+              <div className="text-xs font-medium text-gray-600">Persist model</div>
+              <div className="flex gap-2 items-center">
+                <input
+                  className={inputClass}
+                  placeholder="name (no extension)"
+                  value={saveName}
+                  onChange={(e) => setSaveName(e.target.value)}
+                  disabled={isTraining}
+                />
+                <button
+                  className={btnSecondary}
+                  onClick={handleSaveModel}
+                  disabled={isTraining || !saveName.trim()}
+                >
+                  Save
+                </button>
+              </div>
+              <div className="flex gap-2 items-center">
+                <select
+                  className={inputClass}
+                  value={selectedSaved}
+                  onChange={(e) => setSelectedSaved(e.target.value)}
+                  disabled={isTraining}
+                >
+                  <option value="">— select saved model —</option>
+                  {savedModels.map((m) => (
+                    <option key={m.name} value={m.name}>{m.name}</option>
+                  ))}
+                </select>
+                <button
+                  className={btnSecondary}
+                  onClick={handleLoadModel}
+                  disabled={isTraining || !selectedSaved}
+                >
+                  Load
+                </button>
+              </div>
+              {modelMsg && <p className="text-xs text-gray-500">{modelMsg}</p>}
             </div>
 
             {error && <p className="text-sm text-red-600">{error}</p>}
