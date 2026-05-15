@@ -142,53 +142,35 @@ def find_of_files(machine_id: str, of: str) -> dict[str, str | None]:
 # Window detection
 # ---------------------------------------------------------------------------
 
-# Minimum number of *consecutive* TYZBPS rows whose spindle speed must exceed
-# ``MIN_SPINDLE_MULTIPLIER`` × file-wide non-NaN mean for a same-tool run to
-# qualify as a cutting window. Below this we assume the spindle is only
-# briefly spinning up / coasting and not actually cutting.
-MIN_HIGH_SPINDLE_CONSEC = 10
-MIN_SPINDLE_MULTIPLIER = 2.0
+# Spindle / feed must exceed this multiple of their respective file-wide
+# non-NaN means at *every* row inside a qualifying window.
+MIN_SPINDLE_MULTIPLIER = 1.0
+MIN_FEED_MULTIPLIER = 1.0
+
+# Maximum allowed gap between consecutive TYZBPS timestamps inside a window.
+# A larger gap splits the window into two.
+MAX_TS_GAP_SEC = 2.0
 
 
 def _parse_ts(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, utc=True, errors="coerce")
 
 
-def _longest_true_run(mask: np.ndarray) -> int:
-    """Return the length of the longest contiguous True run in ``mask``."""
-    if mask.size == 0:
-        return 0
-    # Find run lengths via diff on int view.
-    best = run = 0
-    for v in mask:
-        if v:
-            run += 1
-            if run > best:
-                best = run
-        else:
-            run = 0
-    return best
-
-
 def detect_cutting_windows(machine_id: str, of: str) -> list[dict]:
     """Return list of valid cutting windows for a Komatsu OF.
 
-    A window is the **entire contiguous run** of TYZBPS timestamps on which:
+    A window is a contiguous run of TYZBPS timestamps satisfying **all** of
+    the following at every row:
 
-      1. ``Tool_Number`` is unchanged across the run,
-      2. that tool number resolves in the Komatsu tool list to a known
-         diameter (mm) **and** number of inserts (teeth),
-      3. ``Spindle_Speed_Commanded`` and ``Feed_Rate_Commanded`` are both
-         non-NaN (after a forward-fill that only fills *after* the first real
-         observation — leading rows before the first measurement stay NaN
-         and are excluded).
-
-    A qualifying run must additionally contain **at least
-    ``MIN_HIGH_SPINDLE_CONSEC`` consecutive timepoints** with spindle speed
-    above ``MIN_SPINDLE_MULTIPLIER`` × the file-wide non-NaN mean spindle
-    speed. The full same-tool run is emitted as the window (not just the
-    high-spindle subsegment), so the model sees the spin-up and slow-down
-    parts as well.
+      1. ``Tool_Number`` is unchanged across the run, resolves to a known
+         diameter (mm) and number of inserts (teeth), and is non-zero.
+      2. ``Spindle_Speed_Commanded`` and ``Feed_Rate_Commanded`` are both
+         non-NaN (we forward-fill only — leading rows before the first
+         observation stay NaN and are excluded).
+      3. Spindle speed > ``MIN_SPINDLE_MULTIPLIER`` × file-wide non-NaN mean
+         spindle, AND feed rate > ``MIN_FEED_MULTIPLIER`` × file-wide
+         non-NaN mean feed.
+      4. No gap larger than ``MAX_TS_GAP_SEC`` between consecutive rows.
 
     Each window dict carries ``start``, ``end``, ``duration_sec``,
     ``tool_number``, ``diameter_mm``, ``n_inserts`` and ``n_rows`` for UI
@@ -214,18 +196,21 @@ def detect_cutting_windows(machine_id: str, of: str) -> list[dict]:
     df["ts"] = _parse_ts(df["timestamp"])
     df = df.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
 
-    # File-wide mean spindle speed over non-NaN raw rows.
     raw_spindle = df["Spindle_Speed_Commanded"].astype(float)
+    raw_feed = df["Feed_Rate_Commanded"].astype(float)
     mean_spindle = float(raw_spindle.dropna().mean()) if raw_spindle.notna().any() else float("nan")
-    if not np.isfinite(mean_spindle) or mean_spindle <= 0:
+    mean_feed = float(raw_feed.dropna().mean()) if raw_feed.notna().any() else float("nan")
+    if not (np.isfinite(mean_spindle) and mean_spindle > 0 and np.isfinite(mean_feed) and mean_feed > 0):
         return []
-    threshold = MIN_SPINDLE_MULTIPLIER * mean_spindle
+    spindle_thr = MIN_SPINDLE_MULTIPLIER * mean_spindle
+    feed_thr = MIN_FEED_MULTIPLIER * mean_feed
 
-    # Forward-fill only: leading rows with no observation yet remain NaN and
+    # Forward-fill only: leading rows with no observation yet stay NaN and
     # are filtered out by the validity mask below.
     tool = df["Tool_Number"].ffill()
-    spindle = df["Spindle_Speed_Commanded"].astype(float).ffill()
-    feed = df["Feed_Rate_Commanded"].astype(float).ffill()
+    spindle = raw_spindle.ffill()
+    feed = raw_feed.ffill()
+    ts_ns = df["ts"].astype("int64").to_numpy()
 
     # Tool-list lookup for the diameter/teeth check.
     if spec.tool_list_loader == "komatsu":
@@ -234,12 +219,18 @@ def detect_cutting_windows(machine_id: str, of: str) -> list[dict]:
     else:
         tool_list = {}
 
-    # Per-row validity: tool resolvable, diameter+teeth known, spindle+feed
-    # non-NaN.
-    valid = np.zeros(len(df), dtype=bool)
-    tool_int_arr = np.full(len(df), -1, dtype=np.int64)
-    for i, (t, sp, fd) in enumerate(zip(tool, spindle, feed)):
+    n = len(df)
+    valid = np.zeros(n, dtype=bool)
+    tool_int_arr = np.full(n, -1, dtype=np.int64)
+    sp_arr = spindle.to_numpy()
+    fd_arr = feed.to_numpy()
+    for i in range(n):
+        t = tool.iat[i]
+        sp = sp_arr[i]
+        fd = fd_arr[i]
         if pd.isna(t) or pd.isna(sp) or pd.isna(fd):
+            continue
+        if sp <= spindle_thr or fd <= feed_thr:
             continue
         try:
             ti = int(t)
@@ -258,11 +249,8 @@ def detect_cutting_windows(machine_id: str, of: str) -> list[dict]:
     if not valid.any():
         return []
 
-    # Group contiguous runs where validity is True AND Tool_Number is
-    # unchanged. A change in tool number ends the current run.
-    high = (spindle.to_numpy() > threshold) & valid
+    max_gap_ns = int(MAX_TS_GAP_SEC * 1e9)
     windows: list[dict] = []
-    n = len(df)
     i = 0
     while i < n:
         if not valid[i]:
@@ -270,22 +258,25 @@ def detect_cutting_windows(machine_id: str, of: str) -> list[dict]:
             continue
         j = i
         tnum = tool_int_arr[i]
-        while j + 1 < n and valid[j + 1] and tool_int_arr[j + 1] == tnum:
+        while (
+            j + 1 < n
+            and valid[j + 1]
+            and tool_int_arr[j + 1] == tnum
+            and (ts_ns[j + 1] - ts_ns[j]) <= max_gap_ns
+        ):
             j += 1
-        # Run [i, j]. Qualify it on the high-spindle consecutive criterion.
-        if _longest_true_run(high[i : j + 1]) >= MIN_HIGH_SPINDLE_CONSEC:
-            info = tool_list.get(int(tnum), {})
-            start_ts = df["ts"].iloc[i]
-            end_ts = df["ts"].iloc[j]
-            windows.append({
-                "start": start_ts.isoformat(),
-                "end": end_ts.isoformat(),
-                "duration_sec": (end_ts - start_ts).total_seconds(),
-                "tool_number": int(tnum),
-                "diameter_mm": info.get("diameter_mm"),
-                "n_inserts": info.get("n_inserts"),
-                "n_rows": int(j - i + 1),
-            })
+        info = tool_list.get(int(tnum), {})
+        start_ts = df["ts"].iloc[i]
+        end_ts = df["ts"].iloc[j]
+        windows.append({
+            "start": start_ts.isoformat(),
+            "end": end_ts.isoformat(),
+            "duration_sec": (end_ts - start_ts).total_seconds(),
+            "tool_number": int(tnum),
+            "diameter_mm": info.get("diameter_mm"),
+            "n_inserts": info.get("n_inserts"),
+            "n_rows": int(j - i + 1),
+        })
         i = j + 1
 
     return windows
