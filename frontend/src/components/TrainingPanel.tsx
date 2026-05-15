@@ -17,7 +17,7 @@ export default function TrainingPanel({ config, onModelTrained, onModelReset }: 
   const [valSplit, setValSplit] = useState(0.15);
   const [batchSize, setBatchSize] = useState(16);
   const [patience, setPatience] = useState(0);
-  const [nWindows, setNWindows] = useState(1);
+  const [nWindows, setNWindows] = useState(8);
   const [lrSchedule, setLrSchedule] = useState<LRStage[]>([
     { lr: 0.001, epochs: 200 },
     { lr: 0.0001, epochs: 500 },

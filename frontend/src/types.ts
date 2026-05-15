@@ -19,7 +19,7 @@ export const defaultConfig: PipelineConfig = {
   sample_rate: 4096,
   k_peaks: 5,
   f_max_rel: 12,
-  cnn_window: 16,
+  cnn_window: 12,
   pair_embed_dim: 16,
   conv_channels: [16, 16],
   fc_hidden: 32,

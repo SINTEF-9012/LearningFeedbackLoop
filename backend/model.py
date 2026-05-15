@@ -113,7 +113,7 @@ class HarmonicPairBreakNet(nn.Module):
         pair_in_dim: int = 2,
         pair_embed_dim: int = 16,
         n_params: int = 5,
-        cnn_window: int = 16,
+        cnn_window: int = 12,
         conv_channels: list[int] | None = None,
         fc_hidden: int = 32,
         ks: int = 5,

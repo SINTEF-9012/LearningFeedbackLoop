@@ -147,6 +147,13 @@ def find_of_files(machine_id: str, of: str) -> dict[str, str | None]:
 MIN_SPINDLE_MULTIPLIER = 1.0
 MIN_FEED_MULTIPLIER = 1.0
 
+# Physical plausibility caps. CNC controllers occasionally emit sentinel /
+# overflow values (e.g. Fanuc reporting 65540 RPM). Rows with spindle or
+# feed above these caps are treated as invalid both for computing the
+# file-wide mean and for window membership.
+MAX_PLAUSIBLE_SPINDLE_RPM = 20000.0
+MAX_PLAUSIBLE_FEED_MM_MIN = 50000.0
+
 # Maximum allowed gap between consecutive TYZBPS timestamps inside a window.
 # A larger gap splits the window into two.
 MAX_TS_GAP_SEC = 2.0
@@ -198,8 +205,13 @@ def detect_cutting_windows(machine_id: str, of: str) -> list[dict]:
 
     raw_spindle = df["Spindle_Speed_Commanded"].astype(float)
     raw_feed = df["Feed_Rate_Commanded"].astype(float)
-    mean_spindle = float(raw_spindle.dropna().mean()) if raw_spindle.notna().any() else float("nan")
-    mean_feed = float(raw_feed.dropna().mean()) if raw_feed.notna().any() else float("nan")
+    # Mean over non-zero, physically plausible rows so the threshold reflects
+    # actual cutting RPM/feed rather than being dragged down by idle zeros or
+    # inflated by controller-glitch sentinel values.
+    sp_clean = raw_spindle[(raw_spindle > 0) & (raw_spindle <= MAX_PLAUSIBLE_SPINDLE_RPM)]
+    fd_clean = raw_feed[(raw_feed > 0) & (raw_feed <= MAX_PLAUSIBLE_FEED_MM_MIN)]
+    mean_spindle = float(sp_clean.mean()) if len(sp_clean) else float("nan")
+    mean_feed = float(fd_clean.mean()) if len(fd_clean) else float("nan")
     if not (np.isfinite(mean_spindle) and mean_spindle > 0 and np.isfinite(mean_feed) and mean_feed > 0):
         return []
     spindle_thr = MIN_SPINDLE_MULTIPLIER * mean_spindle
@@ -229,6 +241,8 @@ def detect_cutting_windows(machine_id: str, of: str) -> list[dict]:
         sp = sp_arr[i]
         fd = fd_arr[i]
         if pd.isna(t) or pd.isna(sp) or pd.isna(fd):
+            continue
+        if sp > MAX_PLAUSIBLE_SPINDLE_RPM or fd > MAX_PLAUSIBLE_FEED_MM_MIN:
             continue
         if sp <= spindle_thr or fd <= feed_thr:
             continue
@@ -436,7 +450,11 @@ def extract_step(stream: OFStream, vib_row: int, k_peaks: int = 5,
 
     # Peaks -> (C=2, K, 2) with (f_rel, amp); zeros for missing
     pairs = np.zeros((2, k_peaks, 2), dtype=np.float32)
-    valid = bool(spindle and spindle > 0 and diameter and teeth)
+    valid = bool(
+        spindle and spindle > 0 and spindle <= MAX_PLAUSIBLE_SPINDLE_RPM
+        and feed and feed > 0 and feed <= MAX_PLAUSIBLE_FEED_MM_MIN
+        and diameter and teeth
+    )
     if valid:
         fg = spindle / 60.0  # Hz
         for ci, (amp_cols, frq_cols) in enumerate(

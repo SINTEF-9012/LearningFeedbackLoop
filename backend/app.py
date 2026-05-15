@@ -44,7 +44,7 @@ class PipelineConfig(BaseModel):
     sample_rate: float = 4096.0
     k_peaks: int = 5
     f_max_rel: float | None = 12.0   # ignore peaks above 12x spindle by default
-    cnn_window: int = 16
+    cnn_window: int = 12
     pair_embed_dim: int = 16
     conv_channels: list[int] = [16, 16]
     fc_hidden: int = 32
@@ -58,7 +58,7 @@ class TrainRequest(BaseModel):
     lr_schedule: list[dict]
     batch_size: int = 16
     patience: int = 0
-    n_windows: int = 1
+    n_windows: int = 8
 
 
 class EvalRequest(BaseModel):
