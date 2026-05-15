@@ -162,7 +162,8 @@ export default function TrainingPanel({ config, onModelTrained, onModelReset }: 
     wasRunningRef.current = running;
   }, [status?.running, refreshWeights]);
 
-  // Per-pair encoder first-layer weights are now parameter-conditioned:
+  // Per-pair encoder first-layer weights are parameter-conditioned and
+  // shared across channels:
   //     W_eff(p) = W0 + p @ M
   // We visualise:
   //   - W0  (D, 2): the baseline reading of a pair at the parameter centroid.
@@ -478,14 +479,19 @@ export default function TrainingPanel({ config, onModelTrained, onModelReset }: 
           <div className="space-y-4">
             <div className="flex items-start justify-between gap-4">
               <p className="text-xs text-gray-500 flex-1">
-                Each (frequency, amplitude) peak is fed through a per-pair MLP whose
-                first layer is <em>conditioned on the machine parameters</em>:
-                {" "}<code>W_eff(p) = W\u2080 + p \u00b7 M</code>. The baseline{" "}
-                <code>W\u2080</code> ({weights.pair_encoder_W0.length} × 2) is what
-                the encoder reads when the parameters sit at the training mean.
-                The modulation tensor <code>M</code> ({weights.pair_encoder_W0.length}
-                {" "}× {weights.n_params} × 2) shows how each cutting parameter
-                tilts that reading toward (f_rel, amp).
+                Each (frequency, amplitude) peak is fed through a per-pair MLP
+                (Linear → ReLU → Linear → ReLU → Linear) whose first layer is{" "}
+                <em>conditioned on the machine parameters</em>:{" "}
+                <code>W_eff(p) = W\u2080 + p \u00b7 M</code>. Weights are
+                shared across X and Y and across peak slots; channels are
+                kept separate by summing peaks within each channel and
+                concatenating only at the Conv1d input. The baseline{" "}
+                <code>W\u2080</code> ({weights.pair_encoder_W0.length} × 2) is
+                what the encoder reads when the parameters sit at the
+                training mean. The modulation tensor <code>M</code> (
+                {weights.pair_encoder_W0.length} × {weights.n_params} × 2)
+                shows how each cutting parameter tilts that reading toward
+                (f_rel, amp).
               </p>
               <button
                 onClick={refreshWeights}

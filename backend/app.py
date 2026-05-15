@@ -20,6 +20,16 @@ from .harmonics import (
     compute_peak_pairs,
 )
 from .model import HarmonicPairBreakNet
+from .of_replay import (
+    MACHINES,
+    detect_cutting_windows,
+    extract_step,
+    find_of_files,
+    list_machines,
+    list_ofs,
+    load_of_stream,
+    slice_by_window,
+)
 from .trainer import Trainer
 
 # ---------------------------------------------------------------------------
@@ -141,11 +151,10 @@ def get_model_weights():
     """Diagnostics for the parameter-conditioned per-pair encoder.
 
     The per-pair encoder's first linear layer has an effective weight matrix
-    ``W_eff(p) = W0 + p @ M`` where:
+    ``W_eff(p) = W0 + p @ M`` (shared across channels and peak slots) where:
       - ``W0`` of shape ``(D, 2)`` is the baseline reading of a (f_rel, amp)
-        pair when the machine parameters sit at their training mean (since p
-        is standardised).
-      - ``M`` of shape ``(D, n_params, 2)`` is the parameter modulation: each
+        pair when the machine parameters sit at their training mean.
+      - ``M`` of shape ``(D, n_params, 2)`` is the parameter modulation:
         slice ``M[:, p, :]`` says how cutting parameter ``p`` tilts the
         baseline reading of (f_rel, amp).
 
@@ -559,6 +568,188 @@ async def simulate(websocket: WebSocket):
                 "pairs": pairs[t].tolist(),  # (C, K, 2)
                 "prob": prob,
                 "inference_ms": inference_ms,
+            })
+
+            speed = max(1, control["speed"])
+            await asyncio.sleep(1.0 / speed)
+
+        if not control["stopped"]:
+            await websocket.send_json({"type": "done"})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+    finally:
+        reader_task.cancel()
+
+
+# ---------------------------------------------------------------------------
+# OF replay (real-machine streaming inference on Komatsu/Goimek/WWR data)
+# ---------------------------------------------------------------------------
+
+class OFWindowsRequest(BaseModel):
+    machine_id: str
+    of: str
+
+
+@app.get("/api/of/machines")
+def of_machines():
+    return {"machines": list_machines()}
+
+
+@app.get("/api/of/ofs/{machine_id}")
+def of_ofs(machine_id: str):
+    if machine_id not in MACHINES:
+        return {"error": f"Unknown machine '{machine_id}'", "ofs": []}
+    return {"ofs": list_ofs(machine_id)}
+
+
+@app.post("/api/of/windows")
+def of_windows(req: OFWindowsRequest):
+    if req.machine_id not in MACHINES:
+        return {"error": f"Unknown machine '{req.machine_id}'"}
+    paths = find_of_files(req.machine_id, req.of)
+    if not paths["tyzbps"]:
+        return {"error": "Missing TYZBPS file in this OF"}
+    wins = detect_cutting_windows(req.machine_id, req.of)
+    return {
+        "windows": wins,
+        "files": {k: (os.path.basename(v) if v else None) for k, v in paths.items()},
+    }
+
+
+@app.websocket("/ws/of_replay")
+async def of_replay_ws(websocket: WebSocket):
+    await websocket.accept()
+
+    try:
+        start_data = await websocket.receive_json()
+    except WebSocketDisconnect:
+        return
+
+    if start_data.get("action") != "start":
+        await websocket.send_json({"type": "error", "message": "Expected start action"})
+        await websocket.close()
+        return
+
+    if state.model is None:
+        await websocket.send_json({"type": "error", "message": "No model loaded. Train first."})
+        await websocket.close()
+        return
+
+    machine_id = start_data.get("machine_id")
+    of = start_data.get("of")
+    start_iso = start_data.get("start")
+    end_iso = start_data.get("end")
+    if not (machine_id and of and start_iso and end_iso):
+        await websocket.send_json({"type": "error", "message": "machine_id, of, start, end required"})
+        await websocket.close()
+        return
+
+    control = {
+        "paused": False,
+        "stopped": False,
+        "speed": start_data.get("speed", 50),
+    }
+
+    async def reader():
+        try:
+            while True:
+                data = await websocket.receive_json()
+                action = data.get("action")
+                if action == "pause":
+                    control["paused"] = True
+                elif action == "resume":
+                    control["paused"] = False
+                elif action == "stop":
+                    control["stopped"] = True
+                    break
+                elif action == "set_speed":
+                    control["speed"] = max(1, data.get("speed", 50))
+        except WebSocketDisconnect:
+            control["stopped"] = True
+
+    reader_task = asyncio.create_task(reader())
+
+    try:
+        cfg = state.config
+        stream = load_of_stream(machine_id, of)
+        idxs = slice_by_window(stream, start_iso, end_iso)
+        if len(idxs) == 0:
+            await websocket.send_json({"type": "error", "message": "Window contains no vibration rows"})
+            return
+
+        await websocket.send_json({
+            "type": "init",
+            "total_steps": int(len(idxs)),
+            "n_channels": 2,
+            "k_peaks": cfg.k_peaks,
+            "channel_names": CHANNEL_NAMES,
+            "cnn_window": cfg.cnn_window,
+            "machine_id": machine_id,
+            "of": of,
+            "start": start_iso,
+            "end": end_iso,
+            "f_max_rel": cfg.f_max_rel,
+        })
+
+        state.model.eval()
+
+        # Rolling buffer for the temporal context. We push every step regardless
+        # of validity, with zero pairs for invalid (no-tool) rows.
+        pair_buf: list[np.ndarray] = []
+        last_tool = None
+
+        for step_i, vib_row in enumerate(idxs):
+            if control["stopped"]:
+                break
+            while control["paused"] and not control["stopped"]:
+                await asyncio.sleep(0.05)
+            if control["stopped"]:
+                break
+
+            s = extract_step(stream, int(vib_row), k_peaks=cfg.k_peaks, f_max_rel=cfg.f_max_rel)
+            pair_buf.append(s["pairs"])
+            if len(pair_buf) > cfg.cnn_window:
+                pair_buf.pop(0)
+
+            prob = None
+            inference_ms = None
+            if len(pair_buf) == cfg.cnn_window and s["valid"]:
+                pw = np.stack(pair_buf, axis=0)  # (T, C, K, 2)
+                with torch.no_grad():
+                    pt_pairs = torch.tensor(pw).unsqueeze(0).to(state.device)
+                    pt_params = torch.tensor(s["params"]).unsqueeze(0).to(state.device)
+                    t0 = time.perf_counter()
+                    logit = state.model(pt_pairs, pt_params).item()
+                    t1 = time.perf_counter()
+                    inference_ms = round((t1 - t0) * 1000, 3)
+                    prob = float(torch.sigmoid(torch.tensor(logit)).item())
+
+            tool_changed = (s["tool_number"] != last_tool)
+            last_tool = s["tool_number"]
+
+            await websocket.send_json({
+                "type": "step",
+                "t": step_i,
+                "ts": s["ts"],
+                "pairs": s["pairs"].tolist(),
+                "prob": prob,
+                "inference_ms": inference_ms,
+                "tool_number": s["tool_number"],
+                "tool_description": s["tool_description"],
+                "diameter_mm": s["diameter_mm"],
+                "n_inserts": s["n_inserts"],
+                "spindle_rpm": s["spindle_rpm"],
+                "feed_rate": s["feed_rate"],
+                "operation_mode": s["operation_mode"],
+                "valid": s["valid"],
+                "tool_changed": bool(tool_changed and step_i > 0),
+                "params": {k: float(v) for k, v in zip(PARAM_KEYS, s["params"].tolist())},
             })
 
             speed = max(1, control["speed"])

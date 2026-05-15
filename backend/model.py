@@ -39,17 +39,27 @@ import torch.nn.functional as F
 class ParamConditionedPairEncoder(nn.Module):
     """Per-pair MLP whose first linear layer is conditioned on machine params.
 
-    The first layer's effective weight matrix is
+    Weights are **shared across channels (X, Y) and across peak slots**: a
+    peak with a given (f_rel, amp) means the same thing physically in either
+    accelerometer channel — only the way the peaks are aggregated later
+    (DeepSets sum within a channel, then channel-concat) differs. The CNC
+    parameters reshape this universal pair-reading function:
 
         W_eff(p) = W0 + p @ M                  # shape (D, 2)
 
-    where ``W0`` is a parameter-independent baseline and ``M`` of shape
-    ``(D, n_params, 2)`` carries the per-parameter modulation. Standardised
-    machine parameters ``p`` (shape ``(B, n_params)``, zero-mean) thus tilt the
-    encoder's reading of each (f_rel, amp) pair, but the encoder still does
-    something sensible at the parameter centroid (``p ≈ 0``) thanks to ``W0``.
+    where ``W0`` of shape ``(D, 2)`` is the parameter-independent baseline
+    and ``M`` of shape ``(D, n_params, 2)`` carries the per-parameter
+    modulation. Standardised machine parameters ``p`` (shape ``(B, n_params)``,
+    zero-mean) tilt the encoder's reading of each (f_rel, amp) pair while
+    ``W0`` keeps the encoder doing something sensible at the parameter
+    centroid (``p ≈ 0``).
 
-    The second linear layer (``D -> D``) is parameter-independent.
+    After the parameter-conditioned first layer we apply a small MLP:
+
+        Linear(D,2) on params  →  ReLU  →  Linear(D,D)  →  ReLU  →  Linear(D,D)
+
+    The deeper trunk lets the encoder learn non-linear interactions between
+    f_rel and amp before the DeepSets aggregation collapses the K peaks.
 
     Forward signature: ``(pairs, params_std) -> embedding`` where
         pairs: (B, T, C, K, 2)
@@ -70,24 +80,28 @@ class ParamConditionedPairEncoder(nn.Module):
         self.M = nn.Parameter(torch.randn(pair_embed_dim, n_params, pair_in_dim) * 0.01)
         self.b1 = nn.Parameter(torch.zeros(pair_embed_dim))
 
-        # Second layer is a plain Linear; ReLUs in forward.
+        # Two further (parameter-independent) linear layers, with a ReLU
+        # between them. Both run shared across channels and peak slots.
         self.linear2 = nn.Linear(pair_embed_dim, pair_embed_dim)
+        self.linear3 = nn.Linear(pair_embed_dim, pair_embed_dim)
 
     def forward(self, pairs: torch.Tensor, params_std: torch.Tensor) -> torch.Tensor:
-        # Effective per-sample first-layer weight: (B, D, 2). This is the same
-        # for every (t, c, k) in the sample — the machine parameters are a
-        # per-sample property, so the parameter-conditioned read of (f_rel,
-        # amp) is fixed across all pairs in a sample (and across all time
-        # steps in the window).
+        # Effective per-sample first-layer weight: (B, D, 2). Same for every
+        # (t, c, k) in the sample — the CNC parameters are a per-sample
+        # property, so the parameter-conditioned read of (f_rel, amp) is
+        # fixed across all pairs in a sample (and across all time steps and
+        # both accelerometer channels).
         W_eff = torch.einsum("bp,dpi->bdi", params_std, self.M) + self.W0
-        # out[b, t, c, k, d] = sum_i W_eff[b, d, i] * pairs[b, t, c, k, i].
+        # h[b, t, c, k, d] = sum_i W_eff[b, d, i] * pairs[b, t, c, k, i].
         h = torch.einsum("bdi,btcki->btckd", W_eff, pairs) + self.b1
         h = F.relu(h)
-        # Second linear layer — no ReLU afterwards. Leaving the output of the
-        # per-pair encoder linear-in-its-features gives the downstream
-        # DeepSets sum + Conv1d more room to add or subtract contributions
-        # without a non-negativity bottleneck.
         h = self.linear2(h)
+        h = F.relu(h)
+        # No ReLU after the final layer — leaving the per-pair embedding
+        # linear in its features gives the downstream DeepSets sum + Conv1d
+        # room to add or subtract contributions without a non-negativity
+        # bottleneck.
+        h = self.linear3(h)
         return h
 
 
@@ -120,9 +134,11 @@ class HarmonicPairBreakNet(nn.Module):
         self.register_buffer("param_mean", torch.zeros(n_params))
         self.register_buffer("param_std", torch.ones(n_params))
 
-        # Per-pair encoder is now parameter-conditioned at its first layer.
-        # Machine parameters reshape how each (f_rel, amp) is read; they no
-        # longer enter only at the FC head.
+        # Per-pair encoder is parameter-conditioned at its first layer.
+        # Weights are shared across the X and Y channels and across peak
+        # slots: a peak's (f_rel, amp) means the same thing physically in
+        # either channel, and within a channel the peak set is treated as
+        # an unordered set (DeepSets).
         self.pair_encoder = ParamConditionedPairEncoder(
             pair_in_dim=pair_in_dim,
             pair_embed_dim=pair_embed_dim,

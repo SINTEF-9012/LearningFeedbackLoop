@@ -161,14 +161,25 @@ class Trainer:
             )
             val_loader = None
             if val_samples:
+                # Validation uses ONE deterministic centred window per sample
+                # so the val loss matches the test-set evaluation protocol
+                # (which also uses a single window per sample). Using
+                # ``all_windows=True`` here would over-count each sample by
+                # ~(T - cnn_window + 1) heavily-correlated windows and bias
+                # best-epoch selection away from what test actually measures.
                 val_loader = DataLoader(
-                    PairWindowDataset(val_samples, cnn_window, all_windows=True),
+                    PairWindowDataset(val_samples, cnn_window, deterministic=True),
                     batch_size=batch_size,
                     shuffle=False,
                     collate_fn=pair_collate,
                     num_workers=0,
                 )
             loss_fn = nn.BCEWithLogitsLoss()
+            # For validation we want a sample-mean BCE that doesn't depend on
+            # batch boundaries (the default reduction averages per batch, so
+            # the final smaller batch is over-weighted). ``reduction="sum"``
+            # + divide by the total number of val samples is exact.
+            val_loss_fn = nn.BCEWithLogitsLoss(reduction="sum")
 
             for stage_idx, stage in enumerate(lr_schedule):
                 if self.should_stop:
@@ -212,8 +223,8 @@ class Trainer:
                                 pairs = pairs.to(device)
                                 params = params.to(device)
                                 labels = labels.to(device)
-                                v_loss += loss_fn(model(pairs, params), labels).item()
-                                v_n += 1
+                                v_loss += val_loss_fn(model(pairs, params), labels).item()
+                                v_n += int(labels.numel())
                         v_avg = v_loss / max(v_n, 1)
                         self.val_history.append(v_avg)
 

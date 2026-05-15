@@ -101,3 +101,43 @@ export async function evaluate(body: {
     body: JSON.stringify(body),
   });
 }
+
+// -- OF replay -------------------------------------------------------------
+
+export interface MachineInfo {
+  id: string;
+  name: string;
+  n_ofs: number;
+  available: boolean;
+}
+
+export interface OFWindow {
+  start: string;
+  end: string;
+  duration_sec: number;
+  tool_number?: number;
+  diameter_mm?: number | null;
+  n_inserts?: number | null;
+  n_rows?: number;
+}
+
+export async function getMachines() {
+  return fetchJSON<{ machines: MachineInfo[] }>("/api/of/machines");
+}
+
+export async function getOFs(machineId: string) {
+  return fetchJSON<{ ofs: string[]; error?: string }>(
+    `/api/of/ofs/${encodeURIComponent(machineId)}`
+  );
+}
+
+export async function getOFWindows(body: {
+  machine_id: string;
+  of: string;
+}) {
+  return fetchJSON<{
+    windows: OFWindow[];
+    files?: Record<string, string | null>;
+    error?: string;
+  }>("/api/of/windows", { method: "POST", body: JSON.stringify(body) });
+}

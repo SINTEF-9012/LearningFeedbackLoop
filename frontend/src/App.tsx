@@ -6,13 +6,15 @@ import ConfigPanel from "./components/ConfigPanel";
 import TrainingPanel from "./components/TrainingPanel";
 import SimulationPanel from "./components/SimulationPanel";
 import EvaluationPanel from "./components/EvaluationPanel";
+import OFReplayPanel from "./components/OFReplayPanel";
 
-type Tab = "training" | "simulation" | "evaluation" | "config";
+type Tab = "training" | "simulation" | "evaluation" | "of_replay" | "config";
 
 const tabs: { id: Tab; label: string }[] = [
   { id: "training", label: "Training" },
   { id: "simulation", label: "Simulation" },
   { id: "evaluation", label: "Evaluation" },
+  { id: "of_replay", label: "OF Replay" },
   { id: "config", label: "Config" },
 ];
 
@@ -107,6 +109,9 @@ export default function App() {
           </div>
           <div hidden={tab !== "evaluation"}>
             <EvaluationPanel config={config} />
+          </div>
+          <div hidden={tab !== "of_replay"}>
+            <OFReplayPanel config={config} />
           </div>
         </div>
       </main>
