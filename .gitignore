@@ -1,0 +1,92 @@
+# ──────────────────────────────────────────────
+# Python
+# ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+*.whl
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# pytest / coverage
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# mypy / type-checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.ruff_cache/
+
+# ──────────────────────────────────────────────
+# Node / frontend (ui/)
+# ──────────────────────────────────────────────
+node_modules/
+ui/dist/
+ui/test-results/
+ui/playwright-report/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# ──────────────────────────────────────────────
+# Secrets & local configuration
+# ──────────────────────────────────────────────
+# Never commit a real .env — .env.example documents every variable.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# ──────────────────────────────────────────────
+# Data — nothing real belongs in this repository
+# ──────────────────────────────────────────────
+# This project processes proprietary industrial data. Keep it out of git by
+# default: only the generated synthetic dataset under test_data/ is tracked.
+data/
+!data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+*.parquet
+*.xlsx
+*.xls
+
+# Learned/derived artefacts (fitted from whatever data you supply)
+pattern_priors*.json
+pattern_index*.json
+models/
+*.pt
+*.pth
+*.joblib
+*.pkl
+
+# ──────────────────────────────────────────────
+# Editor / OS
+# ──────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db

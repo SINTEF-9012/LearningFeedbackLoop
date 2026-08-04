@@ -1,0 +1,105 @@
+[project]
+name = "lfl-api"
+version = "0.1.0"
+description = "Learning Feedback Loop — operator-in-the-loop anomaly handling for CNC machining time-series"
+requires-python = ">=3.9"
+
+[tool.mypy]
+# Python version (match the runtime environment)
+python_version = "3.12"
+
+# Paths to check
+files = ["backend", "scripts", "tests"]
+
+# `scripts/` is a namespace package (no __init__.py) but `scripts/legacy_migration/`
+# has one, so mypy resolved that module under two names and aborted the whole run
+# with "Source file found twice". Anchoring package names at the repo root makes
+# the mapping unambiguous. Without this, mypy checks NOTHING and exits looking
+# like a pass — see docs/TECH_DEBT_AND_REFACTOR_SCOPE_2026-08-04.md (DEBT-01).
+explicit_package_bases = true
+mypy_path = "."
+exclude = [
+    "venv/",
+    ".venv/",
+    "__pycache__/",
+    ".*\\.pyi$",
+    "node_modules/",
+]
+
+# Strictness settings (lenient mode for gradual adoption)
+# Phase 1: Basic checks only
+warn_return_any = false  # Too noisy with numpy
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+
+# Allow untyped definitions (Phase 2: tighten these)
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false  # Disabled initially
+
+# Handle missing imports gracefully
+ignore_missing_imports = true
+
+# Show error codes for easier suppression
+show_error_codes = true
+
+# Enable incremental mode for faster checks
+incremental = true
+cache_dir = ".mypy_cache"
+
+# Disable noisy error categories for Phase 1
+disable_error_code = [
+    "no-any-return",  # Too noisy with numpy/scipy
+    "attr-defined",   # Many false positives with optional imports
+    "var-annotated",  # Can fix gradually
+    "call-arg",       # Schema mismatch in store.py (needs refactoring)
+    "arg-type",       # Schema mismatch in store.py (needs refactoring)
+    "name-defined",   # Some forward refs and dynamic imports
+    "union-attr",     # Optional faiss/sentence-transformers
+]
+
+# Pydantic plugin for better model support
+plugins = ["pydantic.mypy"]
+
+# Per-module overrides
+[[tool.mypy.overrides]]
+module = "tests.*"
+# Tests can be less strict
+disallow_untyped_defs = false
+disable_error_code = ["var-annotated", "arg-type"]
+
+[[tool.mypy.overrides]]
+module = "scripts.*"
+# Scripts can be less strict
+disallow_untyped_defs = false
+
+# Third-party library overrides (if needed)
+[[tool.mypy.overrides]]
+module = [
+    "faiss.*",
+    "sentence_transformers.*",
+    "river.*",
+    "plotly.*",
+    "torch.*",
+]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+# Pydantic mypy plugin configuration
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+# Move pytest config here too for consistency
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning:pydantic.*:",
+    "ignore::DeprecationWarning:datetime.*:",
+]

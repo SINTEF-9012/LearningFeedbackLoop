@@ -1,0 +1,1 @@
+"""Ingestion primitives for live and simulated sources."""

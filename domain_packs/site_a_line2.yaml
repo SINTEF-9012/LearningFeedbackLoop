@@ -1,0 +1,128 @@
+# Site_a_line2 CNC domain pack (OF-series, 1 Hz sampled machining data).
+# Distinct sensor layout from the casedata machines (SITE_C/Site_b/SITE_A):
+# vibration/chatter come from the accelerometer file (Accel_Severity_Acc_*),
+# process/power from the monitored file (Spindle_Power_percent, SpindleSpeedActual).
+# Channel names verified against data/Site_a_line2/Monitored data/*.
+
+name: site_a_line2
+display_name: "Site_a_line2 CNC (OF-series)"
+
+channel_roles:
+  primary_power: "Spindle_Power_percent"
+  secondary_power: "Axis_Y_power_percent"
+  primary_vibration: "Accel_Severity_Acc_1_range1_Severity"
+  chatter_amplitude: "Accel_Severity_Acc_2_range1_Severity"
+  active_power: "Spdl_actual_power"
+  spindle_speed: "SpindleSpeedActual"
+  feed_rate: "Axis_FeedRate_actual"
+
+signature_channels:
+  - Spindle_Power_percent
+  - SpindleSpeedActual
+  - Axis_FeedRate_actual
+  - Accel_Severity_Acc_1_range1_Severity
+  - Alarms_IsAnyAlarmActivated_TR
+
+z_score_channels:
+  - Spindle_Power_percent
+  - Accel_Severity_Acc_1_range1_Severity
+  - Accel_Severity_Acc_2_range1_Severity
+
+pattern_keys:
+  - SPINDLE_POWER_SURGE
+  - VIBRATION_REGIME_SHIFT
+  - FEED_OVERRIDE_DROP
+  - SENSOR_DECORRELATION
+  - SPINDLE_LOAD_RAMP
+  - FEED_STALL
+
+pattern_key_severities:
+  SPINDLE_POWER_SURGE: 0.90
+  VIBRATION_REGIME_SHIFT: 0.85
+  FEED_OVERRIDE_DROP: 0.70
+  SENSOR_DECORRELATION: 0.75
+  SPINDLE_LOAD_RAMP: 0.65
+  FEED_STALL: 0.65
+
+metadata_columns:
+  - sample_id
+  - label
+  - timestamp
+  - of_id
+
+# Thresholds marker keeps the loaded domain identifiable as YAML-sourced.
+thresholds:
+  chatter_ratio_threshold: 5.0
+  severity_alert_threshold: 0.7
+
+fault_types:
+  - name: tool_breakage
+    pattern_key: "fault:tool_breakage"
+    severity: 0.95
+    description: "Sudden tool failure with spindle power surge and vibration spike."
+    indicators:
+      # At 1 Hz, kurtosis & crest factor are most diagnostic.
+      - feature_name: kurtosis_max
+        sigmoid_center: 3.0
+        sigmoid_steepness: 2.0
+        weight: 0.35
+        display_name: "Kurtosis excess"
+      - feature_name: impulse_crest_factor
+        sigmoid_center: 5.0
+        sigmoid_steepness: 2.0
+        weight: 0.30
+        display_name: "Impulse severity"
+      - feature_name: vib_amplitude_growth
+        sigmoid_center: 2.0
+        sigmoid_steepness: 2.0
+        weight: 0.25
+        display_name: "Vibration growth"
+      # Inverted: low periodicity -> high fault score.
+      - feature_name: periodicity_strength
+        sigmoid_center: 0.5
+        sigmoid_steepness: -8.0
+        weight: 0.10
+        display_name: "Periodicity loss"
+
+  - name: vibration_anomaly
+    pattern_key: "fault:vibration_anomaly"
+    severity: 0.80
+    description: "Abnormal vibration severity with amplitude growth."
+    indicators:
+      - feature_name: vib_amplitude_growth
+        sigmoid_center: 1.5
+        sigmoid_steepness: 3.0
+        weight: 0.50
+        display_name: "Amplitude growth"
+      - feature_name: kurtosis_max
+        sigmoid_center: 2.5
+        sigmoid_steepness: 2.0
+        weight: 0.30
+        display_name: "Kurtosis"
+      - feature_name: modulation_depth
+        sigmoid_center: 0.4
+        sigmoid_steepness: 5.0
+        weight: 0.20
+        display_name: "Modulation"
+
+  - name: power_anomaly
+    pattern_key: "fault:power_anomaly"
+    severity: 0.70
+    description: "Abnormal spindle or axis power consumption."
+    indicators:
+      # hf_energy_ratio re-scaled relative to Nyquist (0.75x Nyquist cutoff).
+      - feature_name: hf_energy_ratio
+        sigmoid_center: 0.20
+        sigmoid_steepness: 15.0
+        weight: 0.40
+        display_name: "Spectral shift"
+      - feature_name: impulse_crest_factor
+        sigmoid_center: 4.0
+        sigmoid_steepness: 3.0
+        weight: 0.35
+        display_name: "Impulse ratio"
+      - feature_name: vib_amplitude_growth
+        sigmoid_center: 1.8
+        sigmoid_steepness: 3.0
+        weight: 0.25
+        display_name: "Power growth"

@@ -1,0 +1,18 @@
+# Generic time-series domain — the auto-detection fallback.
+# No fixed channel roles and no fault-specific classifiers: scoring relies on
+# spectral / temporal / amplitude patterns computed over whatever channels appear.
+# Kept intentionally minimal; it is the domain used when no other pack matches.
+
+name: generic
+display_name: "Generic Time-Series"
+
+channel_roles: {}
+signature_channels: []
+z_score_channels: []
+pattern_keys: []
+fault_types: []
+
+metadata_columns:
+  - sample_id
+  - label
+  - timestamp

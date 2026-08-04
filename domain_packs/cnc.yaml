@@ -1,0 +1,184 @@
+# CNC Machining domain pack — the source of truth for the cnc_machining domain.
+# Channel names are aligned to the case datasets (loaded via
+# backend/agents/processing/dataset_loader.py): SITE_C, Site_b and SITE_A are
+# *similar but not identical*, so each role carries aliases covering the variants;
+# Site_a_line2 is a different sensor layout and uses its own domain (SITE_A_LINE2_DOMAIN).
+# This pack OVERRIDES the Python default when loaded — keep it in sync with the data.
+
+name: cnc_machining
+display_name: "CNC Machining"
+
+# Primary channel per role uses the canonical casedata column name; aliases cover
+# the naming variants seen across SITE_C / Site_b / SITE_A.
+channel_roles:
+  primary_vibration: "Vibration_Severity_X"
+  primary_power: "Power_Spindle"
+  secondary_power: "Power_Y"
+  chatter_amplitude: "Chatter_Detection_Amplitude_X"
+  active_power: "Power_Active"
+  spindle_speed: "Spindle_Speed_Actual"
+  feed_rate: "Feed_Rate_Actual"
+
+channel_role_aliases:
+  primary_vibration: ["Vibration", "Vibration_Severity_Y"]
+  primary_power: ["Spindle_Power"]
+  secondary_power: ["Y_Axis_Power", "X_Axis_Power", "Power_X1", "Power_X2", "Power_Z"]
+  chatter_amplitude: ["Chatter_Amp", "Chatter_Detection_Amplitude_Y"]
+  active_power: ["Active_Power"]
+  spindle_speed: ["Spindle_Speed", "Spindle_Speed_Commanded"]
+  feed_rate: ["Feed_Rate", "Feed_Rate_Commanded"]
+
+# Real casedata column names first (used for auto-detection), plus generic aliases
+# so detection still fires on simplified/renamed streams.
+signature_channels:
+  - Power_Spindle
+  - Power_X1
+  - Power_X2
+  - Power_Y
+  - Power_Z
+  - Power_Active
+  - Vibration_Severity_X
+  - Vibration_Severity_Y
+  - Chatter_Detection_Amplitude_X
+  - Chatter_Detection_Amplitude_Y
+  - Spindle_Speed_Actual
+  - Feed_Rate_Actual
+  - Spindle_Power
+  - X_Axis_Power
+  - Vibration
+  - Chatter_Amp
+  - Active_Power
+  - Spindle_Speed
+  - Feed_Rate
+
+z_score_channels:
+  - Power_Spindle
+  - Vibration_Severity_X
+  - Chatter_Detection_Amplitude_X
+  - Power_Active
+  - Spindle_Power
+  - Vibration
+  - Chatter_Amp
+
+pattern_keys:
+  - SPINDLE_POWER_SURGE
+  - VIBRATION_REGIME_SHIFT
+  - FEED_OVERRIDE_DROP
+  - SENSOR_DECORRELATION
+  - SPINDLE_LOAD_RAMP
+  - FEED_STALL
+
+pattern_key_severities:
+  SPINDLE_POWER_SURGE: 0.90
+  VIBRATION_REGIME_SHIFT: 0.85
+  FEED_OVERRIDE_DROP: 0.75
+  SENSOR_DECORRELATION: 0.80
+  SPINDLE_LOAD_RAMP: 0.70
+  FEED_STALL: 0.65
+
+leaky_columns:
+  - event_stop_duration_s
+  - event_spindle_rpm
+  - event_feed_rate
+  - event_feed_override
+  - feed_actual_min
+  - spindle_actual_min
+  - feed_override_min
+  - spindle_override_min
+
+metadata_columns:
+  - sample_id
+  - label
+  - operation_id
+  - tool_number
+  - event_timestamp
+  - severity
+  - stop_type
+  - window_seconds
+  - gap_seconds
+  - trim_seconds_removed
+
+thresholds:
+  chatter_ratio_threshold: 5.0
+  severity_alert_threshold: 0.7
+  tool_breakage_dominant_threshold: 0.35
+
+fault_types:
+  - name: tool_breakage
+    pattern_key: "fault:tool_breakage"
+    severity: 0.95
+    description: "Sudden catastrophic tool failure with HF energy burst and loss of periodicity."
+    indicators:
+      - feature_name: hf_energy_ratio
+        sigmoid_center: 0.15
+        sigmoid_steepness: 20.0
+        weight: 0.35
+        display_name: "HF energy burst"
+      - feature_name: impulse_crest_factor
+        sigmoid_center: 6.0
+        sigmoid_steepness: 2.0
+        weight: 0.25
+        display_name: "Impulse severity"
+      - feature_name: kurtosis_max
+        sigmoid_center: 4.0
+        sigmoid_steepness: 1.5
+        weight: 0.20
+        display_name: "Kurtosis excess"
+      - feature_name: periodicity_strength
+        sigmoid_center: 0.5
+        sigmoid_steepness: -10.0
+        weight: 0.20
+        display_name: "Periodicity loss"
+
+  - name: chatter
+    pattern_key: "fault:chatter"
+    severity: 0.85
+    description: "Regenerative chatter with amplitude modulation and harmonic energy."
+    indicators:
+      - feature_name: modulation_depth
+        sigmoid_center: 0.5
+        sigmoid_steepness: 5.0
+        weight: 0.40
+        display_name: "Modulation"
+      - feature_name: vib_amplitude_growth
+        sigmoid_center: 2.0
+        sigmoid_steepness: 3.0
+        weight: 0.35
+        display_name: "Amplitude growth"
+      - feature_name: tp_harmonic_energy
+        sigmoid_center: 0.05
+        sigmoid_steepness: 30.0
+        weight: 0.25
+        display_name: "Harmonic energy"
+
+  - name: chip_adhesion
+    pattern_key: "fault:chip_adhesion"
+    severity: 0.75
+    description: "Built-up edge / chip adhesion with irregular tooth-passing pattern."
+    indicators:
+      - feature_name: harmonic_amplitude_cv
+        sigmoid_center: 0.4
+        sigmoid_steepness: 8.0
+        weight: 0.55
+        display_name: "Harmonic irregularity"
+      - feature_name: tp_amplitude_variance
+        sigmoid_center: 0.3
+        sigmoid_steepness: 6.0
+        weight: 0.45
+        display_name: "Tooth-passing variance"
+
+  - name: workpiece_slip
+    pattern_key: "fault:workpiece_slip"
+    severity: 0.70
+    description: "Workpiece slip / clamping issue with shift at spindle frequency."
+    indicators:
+      - feature_name: spindle_order_amplitude
+        sigmoid_center: 0.3
+        sigmoid_steepness: 8.0
+        weight: 0.50
+        display_name: "Spindle order shift"
+      - feature_name: spindle_phase_shift
+        sigmoid_center: 0.5
+        sigmoid_steepness: 4.0
+        weight: 0.50
+        display_name: "Phase shift"

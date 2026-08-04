@@ -1,0 +1,92 @@
+# ===========================================================================
+# Learning Feedback Loop — Docker Compose
+# ===========================================================================
+#
+# Profiles:
+#   core — Neo4j + the LFL backend (minimum viable stack)
+#   full — core + Ollama for local LLM inference
+#
+# Usage:
+#   docker compose --profile core up -d     # Neo4j + backend
+#   docker compose --profile full up -d     # + local LLM
+#
+# Digital twin (SINDIT): this repository does not bundle a twin service. The
+# integration is a plain HTTP client — point SINDIT_API_URL at any reachable
+# SINDIT instance and set SINDIT_ENABLED=true. When it is disabled or
+# unreachable the pipeline degrades gracefully and simply omits twin context.
+# ===========================================================================
+
+services:
+  # -----------------------------------------------------------------------
+  # Neo4j — memory/knowledge graph store
+  # -----------------------------------------------------------------------
+  neo4j:
+    image: neo4j:5-community
+    profiles: ["core", "full"]
+    ports:
+      - "7474:7474"   # Browser UI
+      - "7687:7687"   # Bolt protocol
+    environment:
+      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-changeme}"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_memory_heap_initial__size: "512m"
+      NEO4J_dbms_memory_heap_max__size: "1G"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u ${NEO4J_USERNAME:-neo4j} -p ${NEO4J_PASSWORD:-changeme} 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # -----------------------------------------------------------------------
+  # LFL backend API
+  # -----------------------------------------------------------------------
+  lfl-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["core", "full"]
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      STORAGE_BACKEND: "neo4j"
+      NEO4J_URI: "bolt://neo4j:7687"
+      NEO4J_USERNAME: "${NEO4J_USERNAME:-neo4j}"
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-changeme}"
+      NEO4J_DATABASE: "${NEO4J_DATABASE:-neo4j}"
+      # Point at your own SINDIT deployment, or leave disabled.
+      SINDIT_API_URL: "${SINDIT_API_URL:-}"
+      SINDIT_ENABLED: "${SINDIT_ENABLED:-false}"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+  # -----------------------------------------------------------------------
+  # Ollama — local LLM inference (optional)
+  # -----------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["full"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Uncomment for GPU passthrough:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  ollama_data:

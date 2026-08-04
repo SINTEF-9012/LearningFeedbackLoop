@@ -1,0 +1,82 @@
+# Denkena cross-machine milling-wear domain pack.
+#
+# Public reference dataset (Leibniz Univ. Hannover, Mendeley 10.17632/zpxs87bjt8.3):
+# three 5-axis milling centres, 25 kHz dynamometer force + 500 Hz spindle torque and
+# axis position-deviation. Added to demonstrate that a new sensor domain drops in as a
+# YAML pack (no Python), and to carry the measured-label wear data through the live loop.
+#
+# Role mapping is functional, and documented honestly: this domain has no accelerometer,
+# so the dynamometer FORCE is the primary dynamic channel (fills the primary_vibration
+# role — the scorer treats it as the main dynamic signal, not literally vibration), and
+# spindle TORQUE fills the load/power roles. Channel names verified against the HDF5
+# groups in data/public/denkena_wear/*.h5 (signals_sensor/ and signals_machine/).
+
+name: denkena
+display_name: "Denkena milling-wear (public reference)"
+
+channel_roles:
+  primary_vibration: "force_sensor_x"      # dynamometer force = primary dynamic channel
+  chatter_amplitude: "force_sensor_y"
+  primary_power: "torque_spindle"          # spindle torque = primary load
+  active_power: "torque_spindle"
+  feed_rate: "position_control_deviation_axis_x"
+
+signature_channels:
+  - force_sensor_x
+  - force_sensor_y
+  - force_sensor_z
+  - torque_spindle
+  - position_control_deviation_axis_x
+
+z_score_channels:
+  - force_sensor_x
+  - force_sensor_y
+  - force_sensor_z
+  - torque_spindle
+
+pattern_keys:
+  - FORCE_RMS_RISE
+  - HF_ENERGY_BURST
+  - SPECTRAL_SHIFT
+  - CREST_GROWTH
+
+pattern_key_severities:
+  FORCE_RMS_RISE: 0.80
+  HF_ENERGY_BURST: 0.75
+  SPECTRAL_SHIFT: 0.70
+  CREST_GROWTH: 0.70
+
+metadata_columns:
+  - filename
+  - tool
+  - machine
+  - run
+  - wear
+  - cumulated_tool_contact_time
+
+# Thresholds marker keeps the loaded domain identifiable as YAML-sourced.
+thresholds:
+  chatter_ratio_threshold: 5.0
+  severity_alert_threshold: 0.7
+
+fault_types:
+  - name: tool_wear
+    pattern_key: "fault:tool_wear"
+    severity: 0.85
+    description: "Progressive flank wear: rising force RMS and high-frequency energy."
+    indicators:
+      - feature_name: force_sensor_x_rms
+        sigmoid_center: 0.0
+        sigmoid_steepness: 1.0
+        weight: 0.40
+        display_name: "Force RMS"
+      - feature_name: force_sensor_x_hf_energy_ratio
+        sigmoid_center: 0.0
+        sigmoid_steepness: 1.0
+        weight: 0.35
+        display_name: "HF energy ratio"
+      - feature_name: force_sensor_x_crest
+        sigmoid_center: 0.0
+        sigmoid_steepness: 1.0
+        weight: 0.25
+        display_name: "Crest factor"
