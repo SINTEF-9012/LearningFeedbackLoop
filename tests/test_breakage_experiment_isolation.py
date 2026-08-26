@@ -135,7 +135,9 @@ async def test_missed_event_uses_server_patterns_and_scope(monkeypatch):
         return {"fired": ["SERVER_MISSED_PATTERN"]}
 
     dummy = DummyOrchestrator()
-    monkeypatch.setattr("backend.agents.memory.router.get_orchestrator", lambda: dummy)
+    # report_missed_event asks for the scorer and the store directly now.
+    monkeypatch.setattr("backend.agents.memory.router.get_scorer", lambda: dummy.scorer)
+    monkeypatch.setattr("backend.agents.memory.router.get_store", lambda: dummy.store)
     monkeypatch.setattr("backend.agents.patterns.registry.detect_patterns", fake_detect_patterns)
 
     response = await report_missed_event(

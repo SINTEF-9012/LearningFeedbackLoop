@@ -12,20 +12,20 @@ from backend.agents.memory import router as router_mod
 
 @pytest.mark.asyncio
 async def test_preview_memory_graph_cleanup_route_returns_store_preview(monkeypatch):
-    orchestrator = SimpleNamespace(
-        store=SimpleNamespace(
-            preview_memory_graph_cleanup=lambda: {
-                "scope": "memory_graph",
-                "total_nodes_to_delete": 12,
-                "total_relationships_to_delete": 15,
-                "legacy_candidate_summary": {
-                    "candidate_memories": 9,
-                    "candidate_sessions": 4,
-                },
-            }
-        )
+    store = SimpleNamespace(
+        preview_memory_graph_cleanup=lambda: {
+            "scope": "memory_graph",
+            "total_nodes_to_delete": 12,
+            "total_relationships_to_delete": 15,
+            "legacy_candidate_summary": {
+                "candidate_memories": 9,
+                "candidate_sessions": 4,
+            },
+        }
     )
-    monkeypatch.setattr(graph_mod, "get_orchestrator", lambda: orchestrator)
+    # This handler only ever wanted the store, so it now calls get_store()
+    # directly rather than reaching through the orchestrator — patch that.
+    monkeypatch.setattr(graph_mod, "get_store", lambda: store)
 
     payload = await graph_mod.preview_memory_graph_cleanup()
 
@@ -52,10 +52,11 @@ async def test_clear_memory_graph_route_clears_scoped_graph_and_resets_runtime(m
 
     scorer = _Scorer()
     memory_cache = {"m-1": object()}
+    # Model the orchestrator's supported cache surface, not its private dict.
     orchestrator = SimpleNamespace(
         store=_Store(),
         scorer=scorer,
-        _memories=memory_cache,
+        clear_memory_cache=lambda: (len(memory_cache), memory_cache.clear())[0],
     )
     monkeypatch.setattr(graph_mod, "get_orchestrator", lambda: orchestrator)
 
@@ -94,10 +95,11 @@ async def test_clear_legacy_candidate_memory_route_refreshes_priors_without_rese
 
     scorer = _Scorer()
     memory_cache = {"m-1": object()}
+    # Model the orchestrator's supported cache surface, not its private dict.
     orchestrator = SimpleNamespace(
         store=_Store(),
         scorer=scorer,
-        _memories=memory_cache,
+        clear_memory_cache=lambda: (len(memory_cache), memory_cache.clear())[0],
     )
     monkeypatch.setattr(graph_mod, "get_orchestrator", lambda: orchestrator)
 
@@ -144,10 +146,11 @@ async def test_clear_all_graph_route_runs_when_flag_enabled(monkeypatch):
 
     scorer = _Scorer()
     memory_cache = {"m-1": object()}
+    # Model the orchestrator's supported cache surface, not its private dict.
     orchestrator = SimpleNamespace(
         store=_Store(),
         scorer=scorer,
-        _memories=memory_cache,
+        clear_memory_cache=lambda: (len(memory_cache), memory_cache.clear())[0],
     )
     monkeypatch.setenv("ALLOW_GRAPH_CLEAR_ALL", "1")
     monkeypatch.setattr(graph_mod, "get_orchestrator", lambda: orchestrator)

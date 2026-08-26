@@ -963,12 +963,12 @@ async def harmonic_evaluate(req: HarmonicEvaluationRequest):
 @router.post("/retrain", response_model=HarmonicRetrainResponse)
 async def harmonic_retrain(req: HarmonicRetrainRequest):
     """Retrain a harmonic model from accumulated operator-feedback samples."""
-    from ..agents.memory.orchestrator import get_orchestrator
+    from ..agents.memory.orchestrator import get_scorer
     from ..agents.processing.harmonic_feedback_retrainer import get_harmonic_feedback_retrainer
 
-    orchestrator = get_orchestrator()
+    scorer = get_scorer()
     retrainer = get_harmonic_feedback_retrainer(
-        model_confidence_path=getattr(orchestrator.scorer, "_model_confidence_path", None),
+        model_confidence_path=getattr(scorer, "_model_confidence_path", None),
     )
     result = retrainer.retrain(
         dataset_name=req.dataset,
@@ -1014,12 +1014,12 @@ async def harmonic_retrain_status(
     scorer_kind: Optional[str] = Query(default=None),
 ):
     """Inspect harmonic feedback buffers and retrain readiness per preset."""
-    from ..agents.memory.orchestrator import get_orchestrator
+    from ..agents.memory.orchestrator import get_scorer
     from ..agents.processing.harmonic_feedback_retrainer import get_harmonic_feedback_retrainer
 
-    orchestrator = get_orchestrator()
+    scorer = get_scorer()
     retrainer = get_harmonic_feedback_retrainer(
-        model_confidence_path=getattr(orchestrator.scorer, "_model_confidence_path", None),
+        model_confidence_path=getattr(scorer, "_model_confidence_path", None),
     )
     status = retrainer.get_status(dataset_name=dataset, scorer_kind=scorer_kind)
     return HarmonicRetrainStatusResponse(**status)
@@ -1034,15 +1034,15 @@ async def harmonic_seed_feedback(req: HarmonicFeedbackSeedRequest):
             detail="Harmonic dev feedback seeding is disabled. Set HARMONIC_ENABLE_DEV_SEED=1 to enable this route.",
         )
 
-    from ..agents.memory.orchestrator import get_orchestrator
+    from ..agents.memory.orchestrator import get_scorer
     from ..agents.processing.harmonic_feedback_retrainer import (
         _config_for_feedback_bucket,
         get_harmonic_feedback_retrainer,
     )
 
-    orchestrator = get_orchestrator()
+    scorer = get_scorer()
     retrainer = get_harmonic_feedback_retrainer(
-        model_confidence_path=getattr(orchestrator.scorer, "_model_confidence_path", None),
+        model_confidence_path=getattr(scorer, "_model_confidence_path", None),
     )
 
     resolved_dataset, resolved_kind, _ = _config_for_feedback_bucket(req.dataset, req.scorer_kind)

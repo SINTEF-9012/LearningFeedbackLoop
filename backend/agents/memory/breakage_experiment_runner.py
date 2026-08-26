@@ -310,9 +310,9 @@ class LiveBreakageExperimentRunner(LiveRunnerBase):
         scorer = None
         if self.sandbox_priors:
             try:
-                from backend.agents.memory.orchestrator import get_orchestrator
-                orch = get_orchestrator()
-                scorer = orch.scorer
+                from backend.agents.memory.orchestrator import get_scorer
+                scorer = get_scorer()
+                scorer = scorer
                 scorer.snapshot_priors(self.run_id)
                 self._emit_sync("setup", "progress", "Priors sandboxed", pct=12)
             except Exception as exc:

@@ -20,7 +20,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Body, HTTPException
 
-from .orchestrator import get_orchestrator
+from .orchestrator import get_orchestrator, get_scorer, get_store
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +48,11 @@ async def get_co_occurrence_graph():
           "source": "neo4j" | "experiment_json" | "empty"
         }
     """
-    orchestrator = get_orchestrator()
+    scorer = get_scorer()
+    store = get_store()
 
     # --- Source 1: Neo4j live edges ---------------------------------
-    store = orchestrator.store
+    store = store
     if hasattr(store, "_run") and hasattr(store, "_driver"):
         try:
             rows = store._run(
@@ -74,7 +75,7 @@ async def get_co_occurrence_graph():
                     max_count = max(node_set.get(e["source"], 1), node_set.get(e["target"], 1))
                     e["strength"] = round(e["weight"] / max(max_count, 1), 3)
 
-                priors = dict(orchestrator.scorer._pattern_priors or {})
+                priors = dict(scorer._pattern_priors or {})
                 nodes = [
                     {"id": k, "weight": v, "prior": float(priors.get(k, 0.5))}
                     for k, v in sorted(node_set.items())
@@ -130,7 +131,7 @@ async def get_co_occurrence_graph():
                 max_count = max(node_set_j.get(e["source"], 1), node_set_j.get(e["target"], 1))
                 e["strength"] = round(e["weight"] / max(max_count, 1), 3)
 
-            priors_j = dict(orchestrator.scorer._pattern_priors or {})
+            priors_j = dict(scorer._pattern_priors or {})
             nodes_j = [
                 {"id": k, "weight": v, "prior": float(priors_j.get(k, 0.5))}
                 for k, v in sorted(node_set_j.items())
@@ -150,8 +151,8 @@ async def get_experiment_co_occurrence_graph(run_id: str):
     Only includes patterns and edges from sessions that belong to the
     specified experiment.  Requires Neo4j backend with :Experiment nodes.
     """
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if hasattr(store, "get_experiment_graph"):
         try:
             graph = store.get_experiment_graph(run_id)
@@ -182,8 +183,8 @@ async def list_neo4j_experiments():
           "source": "neo4j" | "none"
         }
     """
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if hasattr(store, "list_experiments"):
         try:
             experiments = store.list_experiments()
@@ -205,8 +206,8 @@ async def decay_co_occurrence(
     *decay_factor*.  Edges with weight ≤ *prune_below* are deleted.
     This keeps the co-occurrence graph focused on the current regime.
     """
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if hasattr(store, "decay_old_co_occurrence"):
         try:
             pruned = store.decay_old_co_occurrence(
@@ -229,8 +230,8 @@ async def decay_co_occurrence(
 @router.get("/graph/stats")
 async def get_graph_stats():
     """Return node and relationship counts for graph management UI."""
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if hasattr(store, "graph_stats"):
         try:
             return store.graph_stats()
@@ -246,8 +247,8 @@ async def preview_memory_graph_cleanup():
 
     This intentionally excludes the document/entity knowledge graph.
     """
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if hasattr(store, "preview_memory_graph_cleanup"):
         try:
             return store.preview_memory_graph_cleanup()
@@ -263,8 +264,8 @@ async def create_snapshot(body: Dict[str, Any] = Body(default={})):
 
     Optional body: ``{label?: string, run_id?: string}``
     """
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if not hasattr(store, "capture_snapshot"):
         raise HTTPException(status_code=501, detail="Neo4j store not available")
     try:
@@ -280,8 +281,8 @@ async def create_snapshot(body: Dict[str, Any] = Body(default={})):
 @router.get("/graph/snapshots")
 async def list_snapshots():
     """List all graph snapshots, newest first."""
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if hasattr(store, "list_snapshots"):
         try:
             return {"snapshots": store.list_snapshots()}
@@ -298,16 +299,17 @@ async def restore_snapshot(snapshot_id: str):
     This overwrites Pattern.prior values and replaces CO_OCCURS_WITH edges.
     Memories and feedback are NOT affected.
     """
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    scorer = get_scorer()
+    store = get_store()
+    store = store
     if not hasattr(store, "restore_snapshot"):
         raise HTTPException(status_code=501, detail="Neo4j store not available")
     try:
         result = store.restore_snapshot(snapshot_id)
         # Also refresh in-memory scorer priors
         try:
-            if hasattr(orchestrator.scorer, "refresh_priors"):
-                orchestrator.scorer.refresh_priors()
+            if hasattr(scorer, "refresh_priors"):
+                scorer.refresh_priors()
         except Exception:
             pass
         return result
@@ -320,8 +322,8 @@ async def restore_snapshot(snapshot_id: str):
 @router.delete("/graph/snapshot/{snapshot_id}")
 async def delete_snapshot(snapshot_id: str):
     """Delete a single snapshot."""
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if not hasattr(store, "delete_snapshot"):
         raise HTTPException(status_code=501, detail="Neo4j store not available")
     ok = store.delete_snapshot(snapshot_id)
@@ -336,8 +338,8 @@ async def delete_experiment(run_id: str):
 
     Shared Pattern nodes and co-occurrence edges are left intact.
     """
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if not hasattr(store, "delete_experiment"):
         raise HTTPException(status_code=501, detail="Neo4j store not available")
     try:
@@ -375,7 +377,7 @@ async def clear_all_graph_data():
         raise HTTPException(status_code=501, detail="Store does not support clearing")
 
     # Also reset in-memory state
-    orchestrator._memories.clear()
+    orchestrator.clear_memory_cache()
     if hasattr(orchestrator.scorer, "reset_feedback_state"):
         orchestrator.scorer.reset_feedback_state()
     else:
@@ -401,7 +403,7 @@ async def clear_memory_graph_data():
     else:
         raise HTTPException(status_code=501, detail="Store does not support memory-graph clearing")
 
-    orchestrator._memories.clear()
+    orchestrator.clear_memory_cache()
     if hasattr(orchestrator.scorer, "reset_feedback_state"):
         orchestrator.scorer.reset_feedback_state()
     else:
@@ -424,7 +426,7 @@ async def clear_legacy_candidate_memory_data():
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    orchestrator._memories.clear()
+    orchestrator.clear_memory_cache()
     priors_refreshed = False
     if hasattr(orchestrator.scorer, "refresh_priors"):
         try:
@@ -468,8 +470,9 @@ async def get_feedback_graph():
           "source": "scorer" | "empty"
         }
     """
-    orchestrator = get_orchestrator()
-    scorer = orchestrator.scorer
+    scorer = get_scorer()
+    store = get_store()
+    scorer = scorer
 
     priors = dict(scorer._pattern_priors or {})
     diagnostics = scorer.get_feedback_diagnostics() if hasattr(scorer, "get_feedback_diagnostics") else {}
@@ -510,7 +513,7 @@ async def get_feedback_graph():
     # Build edges: patterns that appeared together in confirmed memories
     edges: list = []
     try:
-        store = orchestrator.store
+        store = store
         memories = store.list_memories(limit=200, offset=0)
         from collections import Counter
         co_confirmed: Counter = Counter()
@@ -537,8 +540,8 @@ async def get_feedback_graph():
 @router.get("/graph/session-context")
 async def get_session_graph_context():
     """Indicate whether graph data is from the current session or a prior experiment."""
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     is_neo4j = hasattr(store, "_driver") and hasattr(store, "_run")
 
     session_count = 0

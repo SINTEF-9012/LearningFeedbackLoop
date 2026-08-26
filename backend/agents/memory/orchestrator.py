@@ -459,6 +459,33 @@ class MemoryEventOrchestrator:
         except Exception as e:
             logger.debug("Co-occurrence decay on startup failed: %s", e)
     
+    # ------------------------------------------------------------------
+    # In-memory cache accessors
+    # ------------------------------------------------------------------
+    # ``self._memories`` is the orchestrator's own working cache. It used to be
+    # read, counted and cleared directly from router modules — a leading
+    # underscore is this codebase's own signal that something is internal, so
+    # reaching across a module boundary for it left no way to tell what was
+    # allowed. These three methods are the supported surface (DEBT-04).
+
+    def cached_memory_count(self) -> int:
+        """Number of memories currently held in the in-process cache."""
+        return len(self._memories)
+
+    def cached_memories_for_session(self, session_id: str) -> List[Memory]:
+        """Cached memories belonging to one session."""
+        return [m for m in self._memories.values() if m.session_id == session_id]
+
+    def clear_memory_cache(self) -> int:
+        """Drop the in-process cache, returning how many entries were removed.
+
+        Does not touch the backing store — callers that also want persisted
+        memories gone must clear the store separately.
+        """
+        count = len(self._memories)
+        self._memories.clear()
+        return count
+
     def _create_in_memory_adapter(self) -> InMemoryStoreAdapter:
         """Create an in-memory store adapter that wraps self._memories."""
         return InMemoryStoreAdapter(self._memories)
@@ -1785,6 +1812,41 @@ def get_orchestrator(
     if _orchestrator is None:
         _orchestrator = MemoryEventOrchestrator(memory_store, config)
     return _orchestrator
+
+
+def get_scorer() -> "SignificanceScorer":
+    """Get the significance scorer.
+
+    Prefer this over ``get_orchestrator().scorer``. Most callers of
+    ``get_orchestrator()`` do not want the orchestrator at all — they are
+    reaching through it to find another service, which turns it into a service
+    locator and makes "where does this happen?" unanswerable without first
+    learning that everything routes through one object.
+    """
+    return get_orchestrator().scorer
+
+
+def get_store() -> Any:
+    """Get the memory store.
+
+    Prefer this over ``get_orchestrator().store``. See :func:`get_scorer`.
+    """
+    return get_orchestrator().store
+
+
+def get_explainer() -> Any:
+    """Get the explanation generator. Prefer this over ``get_orchestrator().explainer``."""
+    return get_orchestrator().explainer
+
+
+def get_feedback_handler() -> Any:
+    """Get the feedback handler. Prefer this over ``get_orchestrator().feedback_handler``."""
+    return get_orchestrator().feedback_handler
+
+
+def get_orchestrator_config() -> "OrchestratorConfig":
+    """Get the orchestrator's config. Prefer this over ``get_orchestrator().config``."""
+    return get_orchestrator().config
 
 
 async def process_memory_event(event: MemoryEvent) -> MemoryEventResult:

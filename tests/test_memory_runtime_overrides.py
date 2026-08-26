@@ -56,7 +56,9 @@ async def test_patch_memory_config_persists_changes(monkeypatch):
             "dispatch_alerts": bool(changes.get("dispatch_alerts", True)),
         }
 
-    monkeypatch.setattr(router_mod, "get_orchestrator", lambda: orchestrator)
+    # The handler asks for the config directly now rather than reaching through
+    # the orchestrator, so patch that accessor.
+    monkeypatch.setattr(router_mod, "get_orchestrator_config", lambda: orchestrator.config)
     monkeypatch.setattr(router_mod, "persist_runtime_overrides", fake_persist_runtime_overrides)
 
     response = await router_mod.patch_memory_config(

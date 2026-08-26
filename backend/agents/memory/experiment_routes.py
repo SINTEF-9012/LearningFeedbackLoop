@@ -49,7 +49,7 @@ from .experiment_results import (
     _save_error_results,
 )
 from .feedback import FeedbackAction, MemoryFeedbackRequest
-from .orchestrator import get_orchestrator
+from .orchestrator import get_orchestrator, get_scorer, get_store, get_feedback_handler, get_orchestrator_config
 
 logger = logging.getLogger(__name__)
 
@@ -184,8 +184,8 @@ async def create_prior_sandbox(
     if not run_id:
         raise HTTPException(status_code=400, detail="run_id is required")
 
-    orch = get_orchestrator()
-    scorer = orch.scorer
+    scorer = get_scorer()
+    scorer = scorer
     try:
         snap = scorer.snapshot_priors(str(run_id))
     except RuntimeError as exc:
@@ -200,16 +200,16 @@ async def create_prior_sandbox(
 @router.post("/experiment/sandbox/restore")
 async def restore_prior_sandbox():
     """Restore the scorer to production priors (end sandbox)."""
-    orch = get_orchestrator()
-    orch.scorer.restore_priors()
-    return {"is_sandboxed": orch.scorer.is_sandboxed}
+    scorer = get_scorer()
+    scorer.restore_priors()
+    return {"is_sandboxed": scorer.is_sandboxed}
 
 
 @router.get("/experiment/sandbox/diff/{run_id}")
 async def get_sandbox_prior_diff(run_id: str):
     """Compare sandbox priors for *run_id* against production priors."""
-    orch = get_orchestrator()
-    diff = orch.scorer.get_sandbox_diff(run_id)
+    scorer = get_scorer()
+    diff = scorer.get_sandbox_diff(run_id)
     return {"run_id": run_id, **diff}
 
 
@@ -228,8 +228,8 @@ def _push_experiment_to_neo4j(
     Called after a successful experiment to populate the per-experiment
     sub-graph that ``get_experiment_graph()`` later queries.
     """
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if not hasattr(store, "store_experiment"):
         logger.debug("Neo4j store not available — skipping experiment graph push")
         return
@@ -283,8 +283,8 @@ def _capture_neo4j_snapshot(
     label: Optional[str] = None,
 ) -> Optional[str]:
     """Best-effort snapshot capture.  Returns snapshot ID or None."""
-    orchestrator = get_orchestrator()
-    store = orchestrator.store
+    store = get_store()
+    store = store
     if not hasattr(store, "capture_snapshot"):
         return None
     try:
@@ -673,9 +673,9 @@ async def trigger_live_experiment(
             else:
                 # Refresh scorer priors from disk after experiment
                 try:
-                    orch = get_orchestrator()
-                    if hasattr(orch.scorer, "refresh_priors"):
-                        orch.scorer.refresh_priors()
+                    scorer = get_scorer()
+                    if hasattr(scorer, "refresh_priors"):
+                        scorer.refresh_priors()
                 except Exception:
                     pass
 
@@ -1230,12 +1230,12 @@ async def trigger_experiment_run(
         # so the live /scorer/priors endpoint reflects experiment results.
         if proc.returncode == 0:
             try:
-                orch = get_orchestrator()
-                if hasattr(orch.scorer, "refresh_priors"):
-                    orch.scorer.refresh_priors()
+                scorer = get_scorer()
+                if hasattr(scorer, "refresh_priors"):
+                    scorer.refresh_priors()
                     logger.info("Scorer priors refreshed from disk after experiment run")
-                elif hasattr(orch.scorer, "_load_priors"):
-                    orch.scorer._load_priors()
+                elif hasattr(scorer, "_load_priors"):
+                    scorer._load_priors()
                     logger.info("Scorer priors reloaded from disk after experiment run")
             except Exception:
                 logger.debug("Failed to refresh scorer priors after experiment", exc_info=True)
@@ -1325,9 +1325,9 @@ async def trigger_breakage_experiment(
         # Refresh priors on success
         if proc.returncode == 0:
             try:
-                orch = get_orchestrator()
-                if hasattr(orch.scorer, "refresh_priors"):
-                    orch.scorer.refresh_priors()
+                scorer = get_scorer()
+                if hasattr(scorer, "refresh_priors"):
+                    scorer.refresh_priors()
             except Exception:
                 pass
 
@@ -1812,15 +1812,17 @@ async def review_experiment_results(request: ExperimentReviewRequest):
     can trigger model retraining — so the experiment directly improves the
     production system.
     """
-    orch = get_orchestrator()
+    config = get_orchestrator_config()
+    feedback_handler = get_feedback_handler()
+    scorer = get_scorer()
     from .retrainer import get_retrainer
 
     retrainer = get_retrainer(
         model_path=(
-            pathlib.Path(orch.config.seed_model_path)
-            if getattr(orch.config, "seed_model_path", None) else None
+            pathlib.Path(config.seed_model_path)
+            if getattr(config, "seed_model_path", None) else None
         ),
-        model_confidence_path=getattr(orch.scorer, "_model_confidence_path", None),
+        model_confidence_path=getattr(scorer, "_model_confidence_path", None),
     )
     updated = 0
     failed = 0
@@ -1862,18 +1864,18 @@ async def review_experiment_results(request: ExperimentReviewRequest):
             # Apply feedback to memory via feedback_handler.
             # process_feedback internally calls _handle_confirm/_handle_dismiss
             # which already invokes scorer.update_pattern_prior() for each pattern.
-            if review.memory_id and orch.feedback_handler:
+            if review.memory_id and feedback_handler:
                 fb_request = MemoryFeedbackRequest(
                     action=FeedbackAction.CONFIRM if was_significant else FeedbackAction.DISMISS,
                     user_id="experiment_reviewer",
                     reason=review.reason or f"Experiment review (run={request.run_id})",
                 )
-                await orch.feedback_handler.process_feedback(review.memory_id, fb_request)
+                await feedback_handler.process_feedback(review.memory_id, fb_request)
             else:
                 # No memory_id — update priors directly for each pattern key
                 for pk in review.pattern_keys:
-                    if orch.scorer and hasattr(orch.scorer, 'update_pattern_prior'):
-                        orch.scorer.update_pattern_prior(pk, was_significant)
+                    if scorer and hasattr(scorer, 'update_pattern_prior'):
+                        scorer.update_pattern_prior(pk, was_significant)
 
             # Feed features to retrainer so experiment reviews
             # contribute to the model retraining buffer.
@@ -1889,7 +1891,7 @@ async def review_experiment_results(request: ExperimentReviewRequest):
             # Read back prior changes for the response
             for pk in review.pattern_keys:
                 old_prior = prior_changes.get(pk)  # may not exist yet
-                new_prior = orch.scorer.get_pattern_prior(pk) if orch.scorer else 0.5
+                new_prior = scorer.get_pattern_prior(pk) if scorer else 0.5
                 prior_changes[pk] = round(new_prior - 0.5, 4)  # delta from neutral
 
             updated += 1

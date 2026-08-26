@@ -45,6 +45,10 @@ from ..patterns.generator import PatternGenerator
 from .orchestrator import (
     MemoryEvent,
     get_orchestrator,
+    get_scorer,
+    get_store,
+    get_explainer,
+    get_orchestrator_config,
 )
 from .dispatcher import get_dispatcher
 from .experiment_routes import router as experiment_router
@@ -921,7 +925,7 @@ async def patch_memory_config(body: Dict[str, Any]):
 
     Returns the updated config snapshot.
     """
-    orch = get_orchestrator()
+    config = get_orchestrator_config()
     changed = {}
     pending = {}
 
@@ -942,13 +946,13 @@ async def patch_memory_config(body: Dict[str, Any]):
 
     if "dispatch_alerts" in pending:
         val = pending["dispatch_alerts"]
-        orch.config.dispatch_alerts = val
+        config.dispatch_alerts = val
         changed["dispatch_alerts"] = val
         logger.info("Runtime config: dispatch_alerts → %s", val)
 
     if "generate_explanations" in pending:
         val = pending["generate_explanations"]
-        orch.config.generate_explanations = val
+        config.generate_explanations = val
         changed["generate_explanations"] = val
         logger.info("Runtime config: generate_explanations → %s", val)
 
@@ -999,13 +1003,13 @@ async def reset_scorer_priors():
     
     [PROTOTYPE_LLM_MEMORY_V1] - For testing/debugging.
     """
-    orchestrator = get_orchestrator()
-    if hasattr(orchestrator.scorer, "reset_feedback_state"):
-        orchestrator.scorer.reset_feedback_state()
+    scorer = get_scorer()
+    if hasattr(scorer, "reset_feedback_state"):
+        scorer.reset_feedback_state()
     else:
-        orchestrator.scorer._pattern_priors.clear()
-        if hasattr(orchestrator.scorer, "_local_feedback_counts"):
-            orchestrator.scorer._local_feedback_counts.clear()
+        scorer._pattern_priors.clear()
+        if hasattr(scorer, "_local_feedback_counts"):
+            scorer._local_feedback_counts.clear()
     return {
         "message": "Pattern priors cache reset (durable feedback not deleted)",
         "note": "Priors are derived from feedback events; delete feedback events separately if desired.",
@@ -1019,16 +1023,16 @@ async def get_scorer_priors(limit: int = Query(default=50, ge=1, le=500)):
     This is primarily for demos/visualizations to show how operator feedback
     shifts significance scoring over time.
     """
-    orchestrator = get_orchestrator()
-    if hasattr(orchestrator.scorer, "refresh_priors"):
+    scorer = get_scorer()
+    if hasattr(scorer, "refresh_priors"):
         try:
-            orchestrator.scorer.refresh_priors()
+            scorer.refresh_priors()
         except Exception:
             pass
-    priors = dict(orchestrator.scorer._pattern_priors or {})
+    priors = dict(scorer._pattern_priors or {})
     diagnostics = (
-        orchestrator.scorer.get_feedback_diagnostics()
-        if hasattr(orchestrator.scorer, "get_feedback_diagnostics")
+        scorer.get_feedback_diagnostics()
+        if hasattr(scorer, "get_feedback_diagnostics")
         else {}
     )
     items = sorted(priors.items(), key=lambda kv: float(kv[1]), reverse=True)
@@ -1064,11 +1068,11 @@ async def get_scorer_prior(
     Note: context-specific priors are computed inside scoring using CuttingContext.
     """
     _ = session_id
-    orchestrator = get_orchestrator()
-    prior = orchestrator.scorer.get_pattern_prior(pattern_key, context=None)
+    scorer = get_scorer()
+    prior = scorer.get_pattern_prior(pattern_key, context=None)
     diagnostics = (
-        orchestrator.scorer.get_feedback_diagnostics(pattern_key)
-        if hasattr(orchestrator.scorer, "get_feedback_diagnostics")
+        scorer.get_feedback_diagnostics(pattern_key)
+        if hasattr(scorer, "get_feedback_diagnostics")
         else {}
     )
     return {
@@ -1202,7 +1206,7 @@ async def get_loop_metrics(
             if hasattr(orchestrator.store, "list_by_session"):
                 mems = orchestrator.store.list_by_session(session_id, limit=500)
             else:
-                mems = [m for m in orchestrator._memories.values() if m.session_id == session_id]
+                mems = orchestrator.cached_memories_for_session(session_id)
             for mem in mems:
                 stats = orchestrator.feedback_handler.get_feedback_stats(mem.id)
                 confirm += int(stats.get("confirm_count", 0) or 0)
@@ -1268,11 +1272,8 @@ async def delete_all_memories():
     """
     orchestrator = get_orchestrator()
     
-    # Get count before clearing
-    count = len(orchestrator._memories)
-    
-    # Clear in-memory storage
-    orchestrator._memories.clear()
+    # Drop the in-process cache, keeping the count it held
+    count = orchestrator.clear_memory_cache()
     
     # Clear database if using SQLite backend
     if hasattr(orchestrator.store, 'clear') and callable(getattr(orchestrator.store, 'clear')):
@@ -1300,9 +1301,9 @@ async def get_llm_status():
     """
     Check if LLM service is available.
     """
-    orchestrator = get_orchestrator()
-    available = orchestrator.explainer.is_available()
-    ecfg = orchestrator.explainer.config
+    explainer = get_explainer()
+    available = explainer.is_available()
+    ecfg = explainer.config
     return {
         "available": available,
         "provider": ecfg.provider,
@@ -1321,8 +1322,8 @@ async def get_llm_diagnostics():
     information that is useful when the demo script is not producing LLM
     descriptions.
     """
-    orchestrator = get_orchestrator()
-    return orchestrator.explainer.get_diagnostics()
+    explainer = get_explainer()
+    return explainer.get_diagnostics()
 
 
 @router.post("/llm/warmup")
@@ -1339,8 +1340,8 @@ async def warmup_llm():
     automatically force-enables the explainer.  To force-enable manually
     regardless of model name, use ``POST /llm/force-available``.
     """
-    orchestrator = get_orchestrator()
-    explainer = orchestrator.explainer
+    explainer = get_explainer()
+    explainer = explainer
 
     # First attempt a normal availability check to refresh the cached flag
     was_available = explainer.is_available()
@@ -1368,9 +1369,9 @@ async def force_llm_available():
     Use this when you have independently verified that the Ollama endpoint
     serves the configured model (e.g., after a manual `ollama pull`).
     """
-    orchestrator = get_orchestrator()
-    orchestrator.explainer.force_available(True)
-    return orchestrator.explainer.get_diagnostics()
+    explainer = get_explainer()
+    explainer.force_available(True)
+    return explainer.get_diagnostics()
 
 
 
@@ -1493,13 +1494,14 @@ async def retrain_model():
     """
     from .retrainer import get_retrainer
 
-    orchestrator = get_orchestrator()
+    config = get_orchestrator_config()
+    scorer = get_scorer()
     retrainer = get_retrainer(
         model_path=(
-            pathlib.Path(orchestrator.config.seed_model_path)
-            if getattr(orchestrator.config, "seed_model_path", None) else None
+            pathlib.Path(config.seed_model_path)
+            if getattr(config, "seed_model_path", None) else None
         ),
-        model_confidence_path=getattr(orchestrator.scorer, "_model_confidence_path", None),
+        model_confidence_path=getattr(scorer, "_model_confidence_path", None),
     )
     result = retrainer.retrain()
 
@@ -1521,13 +1523,14 @@ async def retrain_status():
     try:
         from .retrainer import get_retrainer
 
-        orchestrator = get_orchestrator()
+        config = get_orchestrator_config()
+        scorer = get_scorer()
         retrainer = get_retrainer(
             model_path=(
-                pathlib.Path(orchestrator.config.seed_model_path)
-                if getattr(orchestrator.config, "seed_model_path", None) else None
+                pathlib.Path(config.seed_model_path)
+                if getattr(config, "seed_model_path", None) else None
             ),
-            model_confidence_path=getattr(orchestrator.scorer, "_model_confidence_path", None),
+            model_confidence_path=getattr(scorer, "_model_confidence_path", None),
         )
         status = retrainer.get_status()
         # Add UI-expected alias fields
@@ -2104,8 +2107,9 @@ async def report_missed_event(request: MissedEventRequest):
     2. Boost the historical prior for the reported pattern keys
     3. Record a feedback event for audit
     """
-    orchestrator = get_orchestrator()
-    scorer = orchestrator.scorer
+    scorer = get_scorer()
+    store = get_store()
+    scorer = scorer
 
     raw_metrics = None
     if request.raw_metrics:
@@ -2140,9 +2144,9 @@ async def report_missed_event(request: MissedEventRequest):
     persisted = False
 
     # 2) Record in the durable feedback store
-    if orchestrator.store and hasattr(orchestrator.store, "add_feedback_event"):
+    if store and hasattr(store, "add_feedback_event"):
         try:
-            orchestrator.store.add_feedback_event(
+            store.add_feedback_event(
                 memory_id=None,
                 action="missed",
                 user_id=request.user_id,

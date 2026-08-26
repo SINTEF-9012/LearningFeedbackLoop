@@ -101,10 +101,11 @@ async def test_feedback_routes_surface_passive_and_severity_diagnostics(tmp_path
         scorer=scorer,
         store=SimpleNamespace(list_memories=lambda limit=200, offset=0: []),
     )
-    # The feedback graph moved to graph_routes; the scorer-prior handlers below
-    # are still in router. Patch both namespaces.
-    monkeypatch.setattr(router_mod, "get_orchestrator", lambda: orchestrator)
-    monkeypatch.setattr(graph_mod, "get_orchestrator", lambda: orchestrator)
+    # These handlers reach for the scorer and the store directly now, so patch
+    # those accessors rather than the orchestrator they used to route through.
+    monkeypatch.setattr(router_mod, "get_scorer", lambda: scorer)
+    monkeypatch.setattr(graph_mod, "get_scorer", lambda: scorer)
+    monkeypatch.setattr(graph_mod, "get_store", lambda: orchestrator.store)
 
     graph_payload = await graph_mod.get_feedback_graph()
     node = next(item for item in graph_payload["nodes"] if item["id"] == pattern_key)
